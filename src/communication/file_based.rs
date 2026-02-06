@@ -36,12 +36,21 @@ impl CommunicationProtocol for FileBasedProtocol {
 }
 
 /// File-based server implementation
-#[derive(Debug)]
 pub struct FileBasedServer {
     config: CommunicationConfig,
     message_file: String,
     lock_file: String,
     is_running: Arc<Mutex<bool>>,
+    message_handler: SharedMessageHandler,
+}
+
+impl std::fmt::Debug for FileBasedServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileBasedServer")
+            .field("config", &self.config)
+            .field("lock_file", &self.lock_file)
+            .finish()
+    }
 }
 
 impl FileBasedServer {
@@ -54,6 +63,7 @@ impl FileBasedServer {
             message_file,
             lock_file,
             is_running: Arc::new(Mutex::new(false)),
+            message_handler: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -154,6 +164,7 @@ impl CommunicationServer for FileBasedServer {
         let is_running = self.is_running.clone();
         let message_file = self.message_file.clone();
         let lock_file = self.lock_file.clone();
+        let message_handler = self.message_handler.clone();
         let config = self.config.clone();
 
         tokio::spawn(async move {
@@ -165,36 +176,20 @@ impl CommunicationServer for FileBasedServer {
                     message_file: message_file.clone(),
                     lock_file: lock_file.clone(),
                     is_running: is_running.clone(),
+                    message_handler: message_handler.clone(),
                 };
                 match server.wait_for_message().await {
-                    Ok(Some(message)) => match message.message_type.as_str() {
-                        "command_line_args" => {
-                            let response = CommunicationMessage::response(
-                                "Command line arguments received successfully".to_string(),
-                            );
-                            if let Err(e) = server.send_response(&response).await {
-                                eprintln!("Failed to send response: {}", e);
-                            }
+                    Ok(Some(message)) => {
+                        ipc_log!("Received message type: {}", message.message_type);
+
+                        // Call message handler if set
+                        if let Some(ref handler) = *message_handler.lock().await {
+                             handler(message.clone());
                         }
-                        "chat" => {
-                            // Print chat message for example
-                            if let Some(content) = message.payload.as_str() {
-                                println!("\r[CHAT] {}: {}", message.source_id, content);
-                                print!("> ");
-                                let _ = std::io::Write::flush(&mut std::io::stdout());
-                            }
-                            let response =
-                                CommunicationMessage::response("Message received".to_string());
-                            let _ = server.send_response(&response).await;
-                        }
-                        _ => {
-                            let error =
-                                CommunicationMessage::error("Unsupported message type".to_string());
-                            if let Err(e) = server.send_response(&error).await {
-                                eprintln!("Failed to send error response: {}", e);
-                            }
-                        }
-                    },
+
+                        let response = CommunicationMessage::response("Received".to_string());
+                        let _ = server.send_response(&response).await;
+                    }
                     Ok(None) => {
                         // Timeout or server stopped, just continue
                     }
@@ -234,6 +229,17 @@ impl CommunicationServer for FileBasedServer {
 
     fn endpoint(&self) -> String {
         format!("file://{}", self.lock_file)
+    }
+
+    fn set_message_handler(
+        &self,
+        handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
+    ) -> Result<(), CommunicationError> {
+        let message_handler = self.message_handler.clone();
+        tokio::spawn(async move {
+            *message_handler.lock().await = Some(handler);
+        });
+        Ok(())
     }
 }
 

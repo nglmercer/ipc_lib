@@ -35,12 +35,20 @@ impl CommunicationProtocol for UnixSocketProtocol {
 }
 
 /// Unix Domain Socket server implementation
-#[derive(Debug)]
 pub struct UnixSocketServer {
     config: CommunicationConfig,
     listener: Arc<Mutex<Option<UnixListener>>>,
     is_running: Arc<Mutex<bool>>,
     broadcast_tx: tokio::sync::broadcast::Sender<CommunicationMessage>,
+    message_handler: SharedMessageHandler,
+}
+
+impl std::fmt::Debug for UnixSocketServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UnixSocketServer")
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl Default for UnixSocketServer {
@@ -51,6 +59,7 @@ impl Default for UnixSocketServer {
             listener: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
             broadcast_tx,
+            message_handler: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -63,6 +72,7 @@ impl UnixSocketServer {
             listener: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
             broadcast_tx,
+            message_handler: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -92,25 +102,21 @@ impl UnixSocketServer {
                             line.clear();
 
                             if let Ok(message) = message_res {
-                                match message.message_type.as_str() {
-                                    "chat" => {
-                                        if let Some(content) = message.payload.as_str() {
-                                            // Printing here shows messages on the host's terminal
-                                            println!("\r[CHAT] {}: {}", message.source_id, content);
-                                            print!("> ");
-                                            let _ = std::io::Write::flush(&mut std::io::stdout());
+                                ipc_log!("Received message type: {}", message.message_type);
 
-                                            // Broadcast to all other clients
-                                            let _ = self.broadcast_tx.send(message);
-                                        }
-                                    }
-                                    _ => {
-                                        let response = CommunicationMessage::response("Received".to_string());
-                                        let mut resp_json = serde_json::to_string(&response)?;
-                                        resp_json.push('\n');
-                                        let _ = writer.write_all(resp_json.as_bytes()).await;
-                                    }
+                                // Call message handler if set
+                                if let Some(ref handler) = *self.message_handler.lock().await {
+                                    handler(message.clone());
                                 }
+
+                                // Broadcast to other clients
+                                let _ = self.broadcast_tx.send(message);
+
+                                // Send response back to client (required for SingleInstanceApp handshake)
+                                let response = CommunicationMessage::response("Received".to_string());
+                                let mut resp_json = serde_json::to_string(&response)?;
+                                resp_json.push('\n');
+                                let _ = writer.write_all(resp_json.as_bytes()).await;
                             }
                         }
                         _ => break,
@@ -142,39 +148,53 @@ impl CommunicationServer for UnixSocketServer {
         let socket_path = Self::get_socket_path(&self.config.identifier);
 
         ipc_log!("UnixSocketServer starting on {}", socket_path);
-        let listener = UnixListener::bind(&socket_path)?;
-        *self.listener.lock().await = Some(listener);
+        let listener_bound = UnixListener::bind(&socket_path)?;
+        *self.listener.lock().await = Some(listener_bound);
         *self.is_running.lock().await = true;
 
+        let listener = match self.listener.lock().await.take() {
+            Some(l) => l,
+            None => {
+                return Err(CommunicationError::ConnectionFailed(
+                    "Listener already taken or not initialized".to_string(),
+                ));
+            }
+        };
+
         let is_running = self.is_running.clone();
-        let listener = self.listener.clone();
         let socket_path_clone = socket_path.clone();
         let broadcast_tx = self.broadcast_tx.clone();
+        let message_handler = self.message_handler.clone();
         let config = self.config.clone();
 
         // Spawn a task to handle incoming connections
         tokio::spawn(async move {
             while *is_running.lock().await {
-                if let Some(l) = listener.lock().await.as_ref() {
-                    match l.accept().await {
-                        Ok((stream, _addr)) => {
-                            let broadcast_rx = broadcast_tx.subscribe();
-                            let broadcast_tx_inner = broadcast_tx.clone();
-                            let config_inner = config.clone();
-                            tokio::spawn(async move {
-                                let server = UnixSocketServer {
-                                    config: config_inner,
-                                    listener: Arc::new(Mutex::new(None)),
-                                    is_running: Arc::new(Mutex::new(true)),
-                                    broadcast_tx: broadcast_tx_inner,
-                                };
-                                let _ = server.handle_client(stream, broadcast_rx).await;
-                            });
-                        }
-                        Err(_) => break,
+                match listener.accept().await {
+                    Ok((stream, _addr)) => {
+                        let broadcast_rx = broadcast_tx.subscribe();
+                        let broadcast_tx_inner = broadcast_tx.clone();
+                        let message_handler_inner = message_handler.clone();
+                        let config_inner = config.clone();
+                        tokio::spawn(async move {
+                            let server = UnixSocketServer {
+                                config: config_inner,
+                                listener: Arc::new(Mutex::new(None)),
+                                is_running: Arc::new(Mutex::new(true)),
+                                broadcast_tx: broadcast_tx_inner,
+                                message_handler: message_handler_inner,
+                            };
+                            let _ = server.handle_client(stream, broadcast_rx).await;
+                        });
                     }
-                } else {
-                    break;
+                    Err(e) => {
+                        if *is_running.lock().await {
+                            eprintln!("Error accepting connection: {}", e);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        } else {
+                            break;
+                        }
+                    }
                 }
             }
             let _ = std::fs::remove_file(&socket_path_clone);
@@ -190,7 +210,10 @@ impl CommunicationServer for UnixSocketServer {
     }
 
     fn is_running(&self) -> bool {
-        *self.is_running.blocking_lock()
+        match self.is_running.try_lock() {
+            Ok(running) => *running,
+            Err(_) => true, // If locked, it's likely running
+        }
     }
 
     fn endpoint(&self) -> String {
@@ -199,6 +222,17 @@ impl CommunicationServer for UnixSocketServer {
 
     async fn broadcast(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
         let _ = self.broadcast_tx.send(message);
+        Ok(())
+    }
+
+    fn set_message_handler(
+        &self,
+        handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
+    ) -> Result<(), CommunicationError> {
+        let message_handler = self.message_handler.clone();
+        tokio::spawn(async move {
+            *message_handler.lock().await = Some(handler);
+        });
         Ok(())
     }
 }

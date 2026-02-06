@@ -3,6 +3,13 @@
 
 use std::error::Error;
 use std::fmt;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Type alias for message handler functions
+pub type MessageHandler = Arc<dyn Fn(CommunicationMessage) + Send + Sync>;
+/// Type alias for the shared, optional message handler
+pub type SharedMessageHandler = Arc<Mutex<Option<MessageHandler>>>;
 
 /// Protocol types available for communication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,14 +162,19 @@ impl CommunicationMessage {
         Self {
             message_type: "error".to_string(),
             payload: serde_json::json!(error),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
+            timestamp: current_timestamp(),
             source_id: "server".to_string(),
             metadata: serde_json::json!(null),
         }
     }
+}
+
+/// Get current timestamp in milliseconds
+pub fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
 /// Trait for communication protocols
@@ -201,6 +213,14 @@ pub trait CommunicationServer: Send + Sync {
 
     /// Broadcast a message to all connected clients
     async fn broadcast(&self, _message: CommunicationMessage) -> Result<(), CommunicationError> {
+        Ok(())
+    }
+
+    /// Set a handler for incoming messages
+    fn set_message_handler(
+        &self,
+        _handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
+    ) -> Result<(), CommunicationError> {
         Ok(())
     }
 }

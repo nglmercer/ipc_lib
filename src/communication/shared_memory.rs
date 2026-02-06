@@ -3,6 +3,7 @@
 //! Works on most platforms and provides fast inter-process communication
 
 use super::*;
+use crate::ipc_log;
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
@@ -37,13 +38,22 @@ impl CommunicationProtocol for SharedMemoryProtocol {
 }
 
 /// Shared memory server implementation
-#[derive(Debug)]
 pub struct SharedMemoryServer {
     config: CommunicationConfig,
     shm_file: String,
     #[allow(dead_code)]
     mmap: Arc<Mutex<Option<MmapMut>>>,
     is_running: Arc<Mutex<bool>>,
+    message_handler: SharedMessageHandler,
+}
+
+impl std::fmt::Debug for SharedMemoryServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedMemoryServer")
+            .field("config", &self.config)
+            .field("shm_file", &self.shm_file)
+            .finish()
+    }
 }
 
 impl SharedMemoryServer {
@@ -72,6 +82,7 @@ impl SharedMemoryServer {
             shm_file,
             mmap: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
+            message_handler: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -198,6 +209,7 @@ impl CommunicationServer for SharedMemoryServer {
         // Spawn a task to handle incoming messages
         let is_running = self.is_running.clone();
         let shm_file = self.shm_file.clone();
+        let message_handler = self.message_handler.clone();
         let config = self.config.clone();
 
         tokio::spawn(async move {
@@ -209,25 +221,20 @@ impl CommunicationServer for SharedMemoryServer {
                     shm_file: shm_file.clone(),
                     mmap: Arc::new(Mutex::new(None)),
                     is_running: is_running.clone(),
+                    message_handler: message_handler.clone(),
                 };
                 match server.wait_for_message().await {
-                    Ok(message) => match message.message_type.as_str() {
-                        "command_line_args" => {
-                            let response = CommunicationMessage::response(
-                                "Command line arguments received successfully".to_string(),
-                            );
-                            if let Err(e) = server.send_response(&response).await {
-                                eprintln!("Failed to send response: {}", e);
-                            }
+                    Ok(message) => {
+                        ipc_log!("Received message type: {}", message.message_type);
+
+                        // Call message handler if set
+                        if let Some(ref handler) = *message_handler.lock().await {
+                            handler(message.clone());
                         }
-                        _ => {
-                            let error =
-                                CommunicationMessage::error("Unsupported message type".to_string());
-                            if let Err(e) = server.send_response(&error).await {
-                                eprintln!("Failed to send error response: {}", e);
-                            }
-                        }
-                    },
+
+                        let response = CommunicationMessage::response("Received".to_string());
+                        let _ = server.send_response(&response).await;
+                    }
                     Err(e) => {
                         // Only log if server is still running
                         if *is_running.lock().await {
@@ -263,6 +270,17 @@ impl CommunicationServer for SharedMemoryServer {
 
     fn endpoint(&self) -> String {
         format!("shm://{}", self.shm_file)
+    }
+
+    fn set_message_handler(
+        &self,
+        handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
+    ) -> Result<(), CommunicationError> {
+        let message_handler = self.message_handler.clone();
+        tokio::spawn(async move {
+            *message_handler.lock().await = Some(handler);
+        });
+        Ok(())
     }
 }
 

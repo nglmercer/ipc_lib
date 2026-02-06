@@ -15,17 +15,18 @@ pub mod communication;
 #[macro_export]
 macro_rules! ipc_log {
     ($($arg:tt)*) => {
-        if std::env::var("IPC_DEBUG").is_ok() {
-            eprintln!("[IPC] {}", format_args!($($arg)*));
-        }
+        eprintln!("[IPC] {}", format_args!($($arg)*));
     };
 }
 
 use communication::{CommunicationError, CommunicationFactory, CommunicationMessage};
+use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 
 // Re-export commonly used types for simpler imports
 pub use communication::CommunicationConfig;
 pub use communication::ProtocolType;
+pub use communication::current_timestamp;
 
 /// Message types for IPC communication (legacy compatibility)
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -41,6 +42,7 @@ pub struct SingleInstanceApp {
     config: CommunicationConfig,
     server: Option<Box<dyn communication::CommunicationServer>>,
     is_primary: bool,
+    message_handler: Option<Arc<dyn Fn(CommunicationMessage) + Send + Sync>>,
 }
 
 impl SingleInstanceApp {
@@ -54,7 +56,17 @@ impl SingleInstanceApp {
             },
             server: None,
             is_primary: false,
+            message_handler: None,
         }
+    }
+
+    /// Set a handler for incoming messages (Primary instance only)
+    pub fn on_message<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(CommunicationMessage) + Send + Sync + 'static,
+    {
+        self.message_handler = Some(Arc::new(handler));
+        self
     }
 
     /// Configure the communication protocol
@@ -112,44 +124,34 @@ impl SingleInstanceApp {
             }
             Err(e) => {
                 ipc_log!(
-                    "No existing instance responded on {:?}: {}",
+                    "No existing instance responded on {:?}: {}. Checking for stale resources...",
                     initial_protocol,
                     e
                 );
+                // Aggressively clean up stale resources before trying to start server
+                self.cleanup_stale_resources(initial_protocol).await;
             }
         }
 
         // 2. Try to start the server with primary protocol
+        println!("📡 Starting new primary instance on {:?}...", initial_protocol);
         match self.start_server().await {
             Ok(_) => {
-                ipc_log!(
-                    "Successfully started server as primary instance on {:?}",
-                    initial_protocol
-                );
+                println!("🏠 Successfully started as host!");
                 let _ = self.write_pid_to_lock();
                 self.is_primary = true;
                 Ok(true)
             }
             Err(e) => {
-                ipc_log!("Failed to start server on {:?}: {}", initial_protocol, e);
-
-                // If bind failed, it might be a stale socket
-                if let ProtocolType::UnixSocket = initial_protocol {
-                    let socket_path = format!("/tmp/{}.sock", self.identifier);
-                    if std::path::Path::new(&socket_path).exists() {
-                        ipc_log!("Detected stale Unix socket at {}. Removing...", socket_path);
-                        let _ = std::fs::remove_file(&socket_path);
-                        // Try again once more after cleanup
-                        if self.start_server().await.is_ok() {
-                            ipc_log!(
-                                "Successfully started server on {:?} after cleanup",
-                                initial_protocol
-                            );
-                            let _ = self.write_pid_to_lock();
-                            self.is_primary = true;
-                            return Ok(true);
-                        }
-                    }
+                println!("⚠️ Failed to start server: {}. Cleaning up...", e);
+                
+                self.cleanup_stale_resources(initial_protocol).await;
+                
+                if self.start_server().await.is_ok() {
+                    println!("🏠 Successfully started as host after cleanup!");
+                    let _ = self.write_pid_to_lock();
+                    self.is_primary = true;
+                    return Ok(true);
                 }
 
                 if self.config.enable_fallback {
@@ -187,8 +189,14 @@ impl SingleInstanceApp {
     /// Start the communication server
     async fn start_server(&mut self) -> Result<(), CommunicationError> {
         let protocol = CommunicationFactory::create_protocol(self.config.protocol)?;
-        self.server = Some(protocol.create_server(&self.config).await?);
-        self.server.as_mut().unwrap().start().await?;
+        let mut server = protocol.create_server(&self.config).await?;
+        
+        if let Some(ref handler) = self.message_handler {
+            server.set_message_handler(handler.clone())?;
+        }
+        
+        server.start().await?;
+        self.server = Some(server);
         Ok(())
     }
 
@@ -205,28 +213,62 @@ impl SingleInstanceApp {
 
     /// Connect to the primary instance
     async fn connect_to_primary(&self) -> Result<String, CommunicationError> {
-        let protocol = CommunicationFactory::create_protocol(self.config.protocol)?;
-        let mut client = protocol.create_client(&self.config).await?;
-        client.connect().await?;
+        let mut config = self.config.clone();
+        config.timeout_ms = 2000; 
 
-        let args = std::env::args().collect();
-        let message = CommunicationMessage::command_line_args(args);
-        client.send_message(&message).await?;
-        let response = client.receive_message().await?;
-        client.disconnect().await?;
+        let protocol = CommunicationFactory::create_protocol(config.protocol)?;
+        let mut client = protocol.create_client(&config).await?;
+        
+        println!("🔗 Attempting to connect to existing session ({:?})...", config.protocol);
+        
+        let handshake = async {
+            client.connect().await?;
+            let args = std::env::args().collect();
+            let message = CommunicationMessage::command_line_args(args);
+            client.send_message(&message).await?;
+            let resp = client.receive_message().await?;
+            client.disconnect().await?;
+            Ok::<CommunicationMessage, CommunicationError>(resp)
+        };
 
-        match response.message_type.as_str() {
-            "response" => Ok(response.payload.as_str().unwrap_or("").to_string()),
-            "error" => Err(CommunicationError::ConnectionFailed(
-                response
-                    .payload
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            )),
-            _ => Err(CommunicationError::ConnectionFailed(
-                "Unexpected response type".to_string(),
-            )),
+        match timeout(Duration::from_millis(config.timeout_ms), handshake).await {
+            Ok(Ok(response)) => {
+                println!("✅ Connected to existing session!");
+                match response.message_type.as_str() {
+                    "response" => Ok(response.payload.as_str().unwrap_or("Received").to_string()),
+                    _ => Ok("Connected".to_string()),
+                }
+            }
+            Ok(Err(e)) => {
+                println!("❌ No existing session found: {}", e);
+                Err(e)
+            }
+            Err(_) => {
+                println!("⏳ Connection handshake timed out");
+                Err(CommunicationError::Timeout("Handshake timed out".to_string()))
+            }
+        }
+    }
+
+    async fn cleanup_stale_resources(&self, protocol: ProtocolType) {
+        match protocol {
+            ProtocolType::UnixSocket => {
+                let socket_path = format!("/tmp/{}.sock", self.identifier);
+                if std::path::Path::new(&socket_path).exists() {
+                    let _ = std::fs::remove_file(&socket_path);
+                }
+            }
+            ProtocolType::FileBased => {
+                let lock_file = format!("/tmp/{}.lock", self.identifier);
+                let message_file = format!("/tmp/{}.msg", self.identifier);
+                let _ = std::fs::remove_file(lock_file);
+                let _ = std::fs::remove_file(message_file);
+            }
+            ProtocolType::SharedMemory => {
+                let shm_file = format!("/tmp/{}.shm", self.identifier);
+                let _ = std::fs::remove_file(shm_file);
+            }
+            _ => {} // Other protocols don't have stale files to clean up yet
         }
     }
 
