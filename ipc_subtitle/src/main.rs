@@ -30,6 +30,7 @@ enum SubtitleAction {
     Clear,
 }
 
+#[allow(dead_code)]
 struct SubtitleText {
     text: String,
     x: f32,

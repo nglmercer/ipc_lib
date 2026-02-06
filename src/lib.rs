@@ -12,10 +12,31 @@
 
 pub mod communication;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static ENABLE_LOGGING: AtomicBool = AtomicBool::new(false);
+
+/// Enable IPC library logging
+pub fn enable_logging() {
+    ENABLE_LOGGING.store(true, Ordering::Relaxed);
+}
+
+/// Disable IPC library logging
+pub fn disable_logging() {
+    ENABLE_LOGGING.store(false, Ordering::Relaxed);
+}
+
+/// Check if IPC library logging is enabled
+pub fn is_logging_enabled() -> bool {
+    ENABLE_LOGGING.load(Ordering::Relaxed)
+}
+
 #[macro_export]
 macro_rules! ipc_log {
     ($($arg:tt)*) => {
-        eprintln!("[IPC] {}", format_args!($($arg)*));
+        if $crate::is_logging_enabled() {
+            eprintln!("[IPC] {}", format_args!($($arg)*));
+        }
     };
 }
 
@@ -24,9 +45,9 @@ use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 // Re-export commonly used types for simpler imports
+pub use communication::current_timestamp;
 pub use communication::CommunicationConfig;
 pub use communication::ProtocolType;
-pub use communication::current_timestamp;
 
 /// Message types for IPC communication (legacy compatibility)
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -134,7 +155,10 @@ impl SingleInstanceApp {
         }
 
         // 2. Try to start the server with primary protocol
-        println!("📡 Starting new primary instance on {:?}...", initial_protocol);
+        println!(
+            "📡 Starting new primary instance on {:?}...",
+            initial_protocol
+        );
         match self.start_server().await {
             Ok(_) => {
                 println!("🏠 Successfully started as host!");
@@ -144,9 +168,9 @@ impl SingleInstanceApp {
             }
             Err(e) => {
                 println!("⚠️ Failed to start server: {}. Cleaning up...", e);
-                
+
                 self.cleanup_stale_resources(initial_protocol).await;
-                
+
                 if self.start_server().await.is_ok() {
                     println!("🏠 Successfully started as host after cleanup!");
                     let _ = self.write_pid_to_lock();
@@ -190,11 +214,11 @@ impl SingleInstanceApp {
     async fn start_server(&mut self) -> Result<(), CommunicationError> {
         let protocol = CommunicationFactory::create_protocol(self.config.protocol)?;
         let mut server = protocol.create_server(&self.config).await?;
-        
+
         if let Some(ref handler) = self.message_handler {
             server.set_message_handler(handler.clone())?;
         }
-        
+
         server.start().await?;
         self.server = Some(server);
         Ok(())
@@ -214,13 +238,16 @@ impl SingleInstanceApp {
     /// Connect to the primary instance
     async fn connect_to_primary(&self) -> Result<String, CommunicationError> {
         let mut config = self.config.clone();
-        config.timeout_ms = 2000; 
+        config.timeout_ms = 2000;
 
         let protocol = CommunicationFactory::create_protocol(config.protocol)?;
         let mut client = protocol.create_client(&config).await?;
-        
-        println!("🔗 Attempting to connect to existing session ({:?})...", config.protocol);
-        
+
+        println!(
+            "🔗 Attempting to connect to existing session ({:?})...",
+            config.protocol
+        );
+
         let handshake = async {
             client.connect().await?;
             let args = std::env::args().collect();
@@ -245,7 +272,9 @@ impl SingleInstanceApp {
             }
             Err(_) => {
                 println!("⏳ Connection handshake timed out");
-                Err(CommunicationError::Timeout("Handshake timed out".to_string()))
+                Err(CommunicationError::Timeout(
+                    "Handshake timed out".to_string(),
+                ))
             }
         }
     }
@@ -396,6 +425,17 @@ impl IpcSession {
     /// Receive a message from the other end
     pub async fn receive(&mut self) -> Result<CommunicationMessage, CommunicationError> {
         self.client.receive_message().await
+    }
+
+    /// Try to reconnect to the server
+    pub async fn reconnect(&mut self) -> Result<(), CommunicationError> {
+        let _ = self.client.disconnect().await;
+        self.client.connect().await
+    }
+
+    /// Check if the session is still connected
+    pub fn is_connected(&self) -> bool {
+        self.client.is_connected()
     }
 }
 

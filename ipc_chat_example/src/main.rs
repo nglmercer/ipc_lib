@@ -84,7 +84,27 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                             source_id: client_username.clone(),
                             metadata: serde_json::json!(null),
                         };
-                        let _ = session.send(msg).await;
+                        
+                        // Try to send, and reconnect if it fails
+                        if let Err(_) = session.send(msg).await {
+                             println!("\r⚠️ Send failed, attempting to reconnect...");
+                             if session.reconnect().await.is_ok() {
+                                 println!("✅ Reconnected! Resending...");
+                                 // Try resending once
+                                 let msg_retry = CommunicationMessage {
+                                     message_type: "chat".to_string(),
+                                     payload: serde_json::json!(content),
+                                     timestamp: current_timestamp(),
+                                     source_id: client_username.clone(),
+                                     metadata: serde_json::json!(null),
+                                 };
+                                 let _ = session.send(msg_retry).await;
+                             } else {
+                                 println!("❌ Reconnect failed. Connection lost.");
+                                 break;
+                             }
+                        }
+                        
                         println!("📤 Sent: {}", content);
                         print!("> ");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -102,8 +122,25 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                             }
                         }
                         Err(_) => {
-                            println!("\r❌ Connection lost");
-                            break;
+                            println!("\r⚠️ Connection lost. Attempting to reconnect...");
+                            // Try to reconnect a few times
+                            let mut reconnected = false;
+                            for i in 1..=3 {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                                println!("Attempt {}/3...", i);
+                                if session.reconnect().await.is_ok() {
+                                    println!("✅ Reconnected!");
+                                    reconnected = true;
+                                    break;
+                                }
+                            }
+                            
+                            if !reconnected {
+                                println!("❌ Could not reconnect.");
+                                break;
+                            }
+                            print!("> ");
+                            let _ = std::io::Write::flush(&mut std::io::stdout());
                         }
                     }
                 }
@@ -124,6 +161,12 @@ async fn main() {
     let args: Vec<String> = env::args().collect();
     let identifier = "ipc_chat_example";
     
+    // Check if logging should be enabled
+    if args.iter().any(|arg| arg == "--log") {
+        single_instance_app::enable_logging();
+        println!("📝 Logging enabled");
+    }
+
     let username = args.get(1)
         .filter(|s| !s.starts_with("--") && *s != "join")
         .cloned()

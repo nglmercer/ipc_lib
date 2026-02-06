@@ -184,7 +184,7 @@ impl CommunicationServer for FileBasedServer {
 
                         // Call message handler if set
                         if let Some(ref handler) = *message_handler.lock().await {
-                             handler(message.clone());
+                            handler(message.clone());
                         }
 
                         let response = CommunicationMessage::response("Received".to_string());

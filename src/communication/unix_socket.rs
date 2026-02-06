@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
 
 /// Unix Domain Socket protocol implementation
 #[derive(Debug)]
@@ -93,9 +93,9 @@ impl UnixSocketServer {
         loop {
             tokio::select! {
                 // Read from client
-                read_result = timeout(Duration::from_millis(self.config.timeout_ms), reader.read_line(&mut line)) => {
+                read_result = reader.read_line(&mut line) => {
                     match read_result {
-                        Ok(Ok(bytes_read)) => {
+                        Ok(bytes_read) => {
                             if bytes_read == 0 { break; }
 
                             let message_res = serde_json::from_str::<CommunicationMessage>(&line);
@@ -119,7 +119,7 @@ impl UnixSocketServer {
                                 let _ = writer.write_all(resp_json.as_bytes()).await;
                             }
                         }
-                        _ => break,
+                        Err(_) => break,
                     }
                 }
                 // Receive broadcast and send to client
