@@ -140,7 +140,7 @@ impl SingleInstanceApp {
                         ipc_log!("Detected stale Unix socket at {}. Removing...", socket_path);
                         let _ = std::fs::remove_file(&socket_path);
                         // Try again once more after cleanup
-                        if let Ok(_) = self.start_server().await {
+                        if self.start_server().await.is_ok() {
                             ipc_log!(
                                 "Successfully started server on {:?} after cleanup",
                                 initial_protocol
@@ -169,7 +169,7 @@ impl SingleInstanceApp {
                         }
 
                         // Try to start server via fallback
-                        if let Ok(_) = self.start_server().await {
+                        if self.start_server().await.is_ok() {
                             ipc_log!("Successfully started server via fallback {:?}", protocol);
                             let _ = self.write_pid_to_lock();
                             self.is_primary = true;
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn test_protocol_type_clone() {
         let protocol = ProtocolType::UnixSocket;
-        let cloned = protocol.clone();
+        let cloned = protocol;
         assert_eq!(protocol, cloned);
     }
 
