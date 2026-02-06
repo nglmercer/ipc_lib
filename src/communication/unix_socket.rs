@@ -4,7 +4,7 @@
 use super::*;
 use crate::ipc_log;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -40,24 +40,29 @@ pub struct UnixSocketServer {
     config: CommunicationConfig,
     listener: Arc<Mutex<Option<UnixListener>>>,
     is_running: Arc<Mutex<bool>>,
+    broadcast_tx: tokio::sync::broadcast::Sender<CommunicationMessage>,
 }
 
 impl Default for UnixSocketServer {
     fn default() -> Self {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(100);
         Self {
             config: CommunicationConfig::default(),
             listener: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
+            broadcast_tx,
         }
     }
 }
 
 impl UnixSocketServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(100);
         Ok(Self {
             config: config.clone(),
             listener: Arc::new(Mutex::new(None)),
             is_running: Arc::new(Mutex::new(false)),
+            broadcast_tx,
         })
     }
 
@@ -65,74 +70,68 @@ impl UnixSocketServer {
         format!("/tmp/{}.sock", identifier)
     }
 
-    async fn handle_client(&self, mut stream: UnixStream) -> Result<(), CommunicationError> {
-        let mut buffer = vec![0u8; 4096];
+    async fn handle_client(
+        &self,
+        stream: UnixStream,
+        mut broadcast_rx: tokio::sync::broadcast::Receiver<CommunicationMessage>,
+    ) -> Result<(), CommunicationError> {
+        use tokio::io::AsyncBufReadExt;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut line = String::new();
 
         loop {
-            match timeout(
-                Duration::from_millis(self.config.timeout_ms),
-                stream.read(&mut buffer),
-            )
-            .await
-            {
-                Ok(Ok(bytes_read)) => {
-                    if bytes_read == 0 {
-                        // Client disconnected
-                        break;
-                    }
+            tokio::select! {
+                // Read from client
+                read_result = timeout(Duration::from_millis(self.config.timeout_ms), reader.read_line(&mut line)) => {
+                    match read_result {
+                        Ok(Ok(bytes_read)) => {
+                            if bytes_read == 0 { break; }
 
-                    let message_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-                    match serde_json::from_str::<CommunicationMessage>(&message_str) {
-                        Ok(message) => match message.message_type.as_str() {
-                            "command_line_args" => {
-                                let response = CommunicationMessage::response(
-                                    "Command line arguments received successfully".to_string(),
-                                );
-                                let response_json = serde_json::to_string(&response)?;
-                                stream.write_all(response_json.as_bytes()).await?;
-                            }
-                            "chat" => {
-                                // For the chat example, we'll print the message to the console
-                                // In a real app, this might be broadcast to other clients
-                                if let Some(content) = message.payload.as_str() {
-                                    println!("\r[CHAT] {}: {}", message.source_id, content);
-                                    print!("> ");
-                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                            let message_res = serde_json::from_str::<CommunicationMessage>(&line);
+                            line.clear();
+
+                            if let Ok(message) = message_res {
+                                match message.message_type.as_str() {
+                                    "chat" => {
+                                        if let Some(content) = message.payload.as_str() {
+                                            // Printing here shows messages on the host's terminal
+                                            println!("\r[CHAT] {}: {}", message.source_id, content);
+                                            print!("> ");
+                                            let _ = std::io::Write::flush(&mut std::io::stdout());
+
+                                            // Broadcast to all other clients
+                                            let _ = self.broadcast_tx.send(message);
+                                        }
+                                    }
+                                    _ => {
+                                        let response = CommunicationMessage::response("Received".to_string());
+                                        let mut resp_json = serde_json::to_string(&response)?;
+                                        resp_json.push('\n');
+                                        let _ = writer.write_all(resp_json.as_bytes()).await;
+                                    }
                                 }
-                                
-                                let response = CommunicationMessage::response("Message received".to_string());
-                                let response_json = serde_json::to_string(&response)?;
-                                stream.write_all(response_json.as_bytes()).await?;
                             }
-                            _ => {
-                                let error = CommunicationMessage::error(
-                                    "Unsupported message type".to_string(),
-                                );
-                                let error_json = serde_json::to_string(&error)?;
-                                stream.write_all(error_json.as_bytes()).await?;
-                            }
-                        },
-                        Err(e) => {
-                            let error = CommunicationMessage::error(format!(
-                                "Failed to parse message: {}",
-                                e
-                            ));
-                            let error_json = serde_json::to_string(&error)?;
-                            stream.write_all(error_json.as_bytes()).await?;
                         }
+                        _ => break,
                     }
                 }
-                Ok(Err(e)) => {
-                    eprintln!("Error reading from client: {}", e);
-                    break;
-                }
-                Err(_) => {
-                    // Timeout reading from client, just break and let them reconnect if needed
-                    break;
+                // Receive broadcast and send to client
+                broadcast_msg = broadcast_rx.recv() => {
+                    match broadcast_msg {
+                        Ok(msg) => {
+                            let mut msg_json = serde_json::to_string(&msg)?;
+                            msg_json.push('\n');
+                            if writer.write_all(msg_json.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
                 }
             }
         }
-
         Ok(())
     }
 }
@@ -150,38 +149,34 @@ impl CommunicationServer for UnixSocketServer {
         let is_running = self.is_running.clone();
         let listener = self.listener.clone();
         let socket_path_clone = socket_path.clone();
+        let broadcast_tx = self.broadcast_tx.clone();
+        let config = self.config.clone();
 
         // Spawn a task to handle incoming connections
         tokio::spawn(async move {
             while *is_running.lock().await {
-                match listener.lock().await.as_ref().unwrap().accept().await {
-                    Ok((stream, _addr)) => {
-                        let stream_clone = stream;
-                        tokio::spawn(async move {
-                            if let Err(e) = Self::handle_client(
-                                &Self {
-                                    config: CommunicationConfig::default(),
+                if let Some(l) = listener.lock().await.as_ref() {
+                    match l.accept().await {
+                        Ok((stream, _addr)) => {
+                            let broadcast_rx = broadcast_tx.subscribe();
+                            let broadcast_tx_inner = broadcast_tx.clone();
+                            let config_inner = config.clone();
+                            tokio::spawn(async move {
+                                let server = UnixSocketServer {
+                                    config: config_inner,
                                     listener: Arc::new(Mutex::new(None)),
                                     is_running: Arc::new(Mutex::new(true)),
-                                },
-                                stream_clone,
-                            )
-                            .await
-                            {
-                                eprintln!("Error handling client: {}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        if *is_running.lock().await {
-                            eprintln!("Error accepting connection: {}", e);
+                                    broadcast_tx: broadcast_tx_inner,
+                                };
+                                let _ = server.handle_client(stream, broadcast_rx).await;
+                            });
                         }
-                        break;
+                        Err(_) => break,
                     }
+                } else {
+                    break;
                 }
             }
-
-            // Clean up socket file when server stops
             let _ = std::fs::remove_file(&socket_path_clone);
         });
 
@@ -201,23 +196,28 @@ impl CommunicationServer for UnixSocketServer {
     fn endpoint(&self) -> String {
         Self::get_socket_path(&self.config.identifier)
     }
+
+    async fn broadcast(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+        let _ = self.broadcast_tx.send(message);
+        Ok(())
+    }
 }
 
 /// Unix Domain Socket client implementation
 #[derive(Debug)]
 pub struct UnixSocketClient {
     config: CommunicationConfig,
-    stream: Option<tokio::net::UnixStream>,
+    reader: Option<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    writer: Option<tokio::net::unix::OwnedWriteHalf>,
     connected: bool,
 }
 
 impl UnixSocketClient {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
-        let _socket_path = format!("/tmp/{}.sock", config.identifier);
-
         Ok(Self {
             config: config.clone(),
-            stream: None,
+            reader: None,
+            writer: None,
             connected: false,
         })
     }
@@ -230,7 +230,10 @@ impl CommunicationClient for UnixSocketClient {
         ipc_log!("UnixSocketClient connecting to {}", socket_path);
 
         let stream = UnixStream::connect(&socket_path).await?;
-        self.stream = Some(stream);
+        let (reader_half, writer_half) = stream.into_split();
+
+        self.reader = Some(tokio::io::BufReader::new(reader_half));
+        self.writer = Some(writer_half);
         self.connected = true;
         Ok(())
     }
@@ -245,9 +248,10 @@ impl CommunicationClient for UnixSocketClient {
             ));
         }
 
-        let stream = self.stream.as_mut().unwrap();
-        let message_json = serde_json::to_string(message)?;
-        stream.write_all(message_json.as_bytes()).await?;
+        let writer = self.writer.as_mut().unwrap();
+        let mut message_json = serde_json::to_string(message)?;
+        message_json.push('\n');
+        writer.write_all(message_json.as_bytes()).await?;
         Ok(())
     }
 
@@ -258,19 +262,26 @@ impl CommunicationClient for UnixSocketClient {
             ));
         }
 
-        let stream = self.stream.as_mut().unwrap();
-        let mut buffer = vec![0u8; 4096];
-        let bytes_read = stream.read(&mut buffer).await?;
+        use tokio::io::AsyncBufReadExt;
+        let reader = self.reader.as_mut().unwrap();
+        let mut line = String::new();
 
-        let message_str = String::from_utf8_lossy(&buffer[..bytes_read]);
-        let message: CommunicationMessage = serde_json::from_str(&message_str)
-            .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?;
+        let bytes_read = reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            return Err(CommunicationError::ConnectionFailed(
+                "Connection closed".to_string(),
+            ));
+        }
+
+        let message: CommunicationMessage = serde_json::from_str(&line)
+            .map_err(|e| CommunicationError::DeserializationFailed(format!("{}: {}", e, line)))?;
 
         Ok(message)
     }
 
     async fn disconnect(&mut self) -> Result<(), CommunicationError> {
-        self.stream = None;
+        self.reader = None;
+        self.writer = None;
         self.connected = false;
         Ok(())
     }

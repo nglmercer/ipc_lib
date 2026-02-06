@@ -183,7 +183,8 @@ impl CommunicationServer for FileBasedServer {
                                 print!("> ");
                                 let _ = std::io::Write::flush(&mut std::io::stdout());
                             }
-                            let response = CommunicationMessage::response("Message received".to_string());
+                            let response =
+                                CommunicationMessage::response("Message received".to_string());
                             let _ = server.send_response(&response).await;
                         }
                         _ => {
@@ -268,7 +269,10 @@ impl CommunicationClient for FileBasedClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         // Check if lock file exists
         let lock_file = format!("/tmp/{}.lock", self.config.identifier);
-        ipc_log!("FileBasedClient connecting, checking lock_file: {}", lock_file);
+        ipc_log!(
+            "FileBasedClient connecting, checking lock_file: {}",
+            lock_file
+        );
         if !Path::new(&lock_file).exists() {
             return Err(CommunicationError::ConnectionFailed(
                 "Server not running".to_string(),

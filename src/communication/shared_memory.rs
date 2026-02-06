@@ -60,6 +60,7 @@ impl SharedMemoryServer {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .mode(0o600)
             .open(&shm_file)?;
 

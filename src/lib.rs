@@ -94,31 +94,45 @@ impl SingleInstanceApp {
     /// Enforce single instance and start the application
     pub async fn enforce_single_instance(&mut self) -> Result<bool, CommunicationError> {
         let initial_protocol = self.config.protocol;
-        
-        ipc_log!("Attempting single instance enforcement for '{}' (primary protocol: {:?})", self.identifier, initial_protocol);
+
+        ipc_log!(
+            "Attempting single instance enforcement for '{}' (primary protocol: {:?})",
+            self.identifier,
+            initial_protocol
+        );
 
         // 1. Try to connect to existing server first (fast path)
         match self.connect_to_primary().await {
             Ok(response) => {
-                ipc_log!("Connected to existing primary instance. Response: {}", response);
+                ipc_log!(
+                    "Connected to existing primary instance. Response: {}",
+                    response
+                );
                 return Ok(false);
             }
             Err(e) => {
-                ipc_log!("No existing instance responded on {:?}: {}", initial_protocol, e);
+                ipc_log!(
+                    "No existing instance responded on {:?}: {}",
+                    initial_protocol,
+                    e
+                );
             }
         }
 
         // 2. Try to start the server with primary protocol
         match self.start_server().await {
             Ok(_) => {
-                ipc_log!("Successfully started server as primary instance on {:?}", initial_protocol);
+                ipc_log!(
+                    "Successfully started server as primary instance on {:?}",
+                    initial_protocol
+                );
                 let _ = self.write_pid_to_lock();
                 self.is_primary = true;
-                return Ok(true);
+                Ok(true)
             }
             Err(e) => {
                 ipc_log!("Failed to start server on {:?}: {}", initial_protocol, e);
-                
+
                 // If bind failed, it might be a stale socket
                 if let ProtocolType::UnixSocket = initial_protocol {
                     let socket_path = format!("/tmp/{}.sock", self.identifier);
@@ -127,7 +141,10 @@ impl SingleInstanceApp {
                         let _ = std::fs::remove_file(&socket_path);
                         // Try again once more after cleanup
                         if let Ok(_) = self.start_server().await {
-                            ipc_log!("Successfully started server on {:?} after cleanup", initial_protocol);
+                            ipc_log!(
+                                "Successfully started server on {:?} after cleanup",
+                                initial_protocol
+                            );
                             let _ = self.write_pid_to_lock();
                             self.is_primary = true;
                             return Ok(true);
@@ -138,13 +155,15 @@ impl SingleInstanceApp {
                 if self.config.enable_fallback {
                     let fallback_protocols = self.config.fallback_protocols.clone();
                     for protocol in fallback_protocols {
-                        if protocol == initial_protocol { continue; }
-                        
+                        if protocol == initial_protocol {
+                            continue;
+                        }
+
                         ipc_log!("Trying fallback protocol: {:?}", protocol);
                         self.config.protocol = protocol;
-                        
+
                         // Check if we can connect via fallback first
-                        if let Ok(resp) = self.connect_to_primary().await {
+                        if let Ok(_resp) = self.connect_to_primary().await {
                             ipc_log!("Connected to existing instance via fallback {:?}", protocol);
                             return Ok(false);
                         }
@@ -160,7 +179,7 @@ impl SingleInstanceApp {
                 }
 
                 ipc_log!("All protocols failed. Error: {}", e);
-                return Err(e);
+                Err(e)
             }
         }
     }
@@ -171,6 +190,17 @@ impl SingleInstanceApp {
         self.server = Some(protocol.create_server(&self.config).await?);
         self.server.as_mut().unwrap().start().await?;
         Ok(())
+    }
+
+    /// Broadcast a message to all connected clients (Primary instance only)
+    pub async fn broadcast(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+        if let Some(ref server) = self.server {
+            server.broadcast(message).await
+        } else {
+            Err(CommunicationError::ConnectionFailed(
+                "Server not started".to_string(),
+            ))
+        }
     }
 
     /// Connect to the primary instance
@@ -241,23 +271,6 @@ impl SingleInstanceApp {
         file.write_all(std::process::id().to_string().as_bytes())
             .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))
     }
-
-    /// Read PID from lock file
-    fn read_pid_from_lock(&self) -> Result<u32, CommunicationError> {
-        let lock_file = format!("/tmp/{}.pid", self.identifier);
-        let pid_str = std::fs::read_to_string(&lock_file)
-            .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))?;
-        pid_str
-            .parse::<u32>()
-            .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))
-    }
-
-    /// Clean up stale lock file
-    fn cleanup_stale_lock(&self) -> Result<(), CommunicationError> {
-        let lock_file = format!("/tmp/{}.pid", self.identifier);
-        std::fs::remove_file(&lock_file)
-            .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))
-    }
 }
 
 /// IPC Client wrapper for simple usage
@@ -312,15 +325,35 @@ impl IpcClient {
         &mut self,
         message: CommunicationMessage,
     ) -> Result<CommunicationMessage, CommunicationError> {
+        let mut session = self.connect_persistent().await?;
+        session.send(message).await?;
+        let response = session.receive().await?;
+        Ok(response)
+    }
+
+    /// Connect to the primary instance and keep the connection alive
+    pub async fn connect_persistent(&self) -> Result<IpcSession, CommunicationError> {
         let protocol = CommunicationFactory::create_protocol(self.config.protocol)?;
         let mut client = protocol.create_client(&self.config).await?;
         client.connect().await?;
+        Ok(IpcSession { client })
+    }
+}
 
-        client.send_message(&message).await?;
-        let response = client.receive_message().await?;
-        client.disconnect().await?;
+/// A persistent IPC session
+pub struct IpcSession {
+    client: Box<dyn communication::CommunicationClient>,
+}
 
-        Ok(response)
+impl IpcSession {
+    /// Send a message to the other end
+    pub async fn send(&mut self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+        self.client.send_message(&message).await
+    }
+
+    /// Receive a message from the other end
+    pub async fn receive(&mut self) -> Result<CommunicationMessage, CommunicationError> {
+        self.client.receive_message().await
     }
 }
 

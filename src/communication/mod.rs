@@ -100,7 +100,7 @@ impl Default for CommunicationConfig {
             fallback_protocols: vec![
                 ProtocolType::UnixSocket,
                 ProtocolType::FileBased,
-                ProtocolType::InMemory,
+                ProtocolType::SharedMemory,
             ],
         }
     }
@@ -198,6 +198,11 @@ pub trait CommunicationServer: Send + Sync {
 
     /// Get the server address/endpoint
     fn endpoint(&self) -> String;
+
+    /// Broadcast a message to all connected clients
+    async fn broadcast(&self, _message: CommunicationMessage) -> Result<(), CommunicationError> {
+        Ok(())
+    }
 }
 
 /// Client interface for communication protocols
