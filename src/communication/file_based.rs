@@ -19,11 +19,17 @@ impl CommunicationProtocol for FileBasedProtocol {
         ProtocolType::FileBased
     }
 
-    async fn create_server(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
+    async fn create_server(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
         Ok(Box::new(FileBasedServer::new(config)?))
     }
 
-    async fn create_client(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
+    async fn create_client(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
         Ok(Box::new(FileBasedClient::new(config)?))
     }
 }
@@ -69,11 +75,13 @@ impl FileBasedServer {
     async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
-        
+
         loop {
             // Check if server is still running
             if !*self.is_running.lock().await {
-                return Err(CommunicationError::ConnectionFailed("Server stopped".to_string()));
+                return Err(CommunicationError::ConnectionFailed(
+                    "Server stopped".to_string(),
+                ));
             }
 
             // Check if message file exists
@@ -94,22 +102,27 @@ impl FileBasedServer {
 
             // Wait a bit before checking again
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             // Check timeout
             if start_time.elapsed() >= timeout_duration {
-                return Err(CommunicationError::Timeout("No message received".to_string()));
+                return Err(CommunicationError::Timeout(
+                    "No message received".to_string(),
+                ));
             }
         }
     }
 
-    async fn send_response(&self, response: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_response(
+        &self,
+        response: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         let response_file = format!("{}.response", self.message_file);
-        
+
         // Create response file using tokio async file operations
         let mut file = tokio::fs::File::create(&response_file).await?;
         let response_json = serde_json::to_string(response)?;
         file.write_all(response_json.as_bytes()).await?;
-        
+
         Ok(())
     }
 }
@@ -121,7 +134,7 @@ impl CommunicationServer for FileBasedServer {
         let mut lock_file = tokio::fs::File::create(&self.lock_file).await?;
         lock_file.write_all(b"running").await?;
         lock_file.flush().await?;
-        
+
         *self.is_running.lock().await = true;
 
         // Spawn a task to handle incoming messages
@@ -141,26 +154,23 @@ impl CommunicationServer for FileBasedServer {
                     is_running: is_running.clone(),
                 };
                 match server.wait_for_message().await {
-                    Ok(message) => {
-                        match message.message_type.as_str() {
-                            "command_line_args" => {
-                                let response = CommunicationMessage::response(
-                                    "Command line arguments received successfully".to_string()
-                                );
-                                if let Err(e) = server.send_response(&response).await {
-                                    eprintln!("Failed to send response: {}", e);
-                                }
-                            }
-                            _ => {
-                                let error = CommunicationMessage::error(
-                                    "Unsupported message type".to_string()
-                                );
-                                if let Err(e) = server.send_response(&error).await {
-                                    eprintln!("Failed to send error response: {}", e);
-                                }
+                    Ok(message) => match message.message_type.as_str() {
+                        "command_line_args" => {
+                            let response = CommunicationMessage::response(
+                                "Command line arguments received successfully".to_string(),
+                            );
+                            if let Err(e) = server.send_response(&response).await {
+                                eprintln!("Failed to send response: {}", e);
                             }
                         }
-                    }
+                        _ => {
+                            let error =
+                                CommunicationMessage::error("Unsupported message type".to_string());
+                            if let Err(e) = server.send_response(&error).await {
+                                eprintln!("Failed to send error response: {}", e);
+                            }
+                        }
+                    },
                     Err(e) => {
                         eprintln!("Error handling message: {}", e);
                     }
@@ -231,16 +241,23 @@ impl CommunicationClient for FileBasedClient {
         // Check if lock file exists
         let lock_file = format!("/tmp/{}.lock", self.config.identifier);
         if !Path::new(&lock_file).exists() {
-            return Err(CommunicationError::ConnectionFailed("Server not running".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Server not running".to_string(),
+            ));
         }
 
         self.connected = true;
         Ok(())
     }
 
-    async fn send_message(&mut self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_message(
+        &mut self,
+        message: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         // Create message file using tokio async file operations
@@ -253,7 +270,9 @@ impl CommunicationClient for FileBasedClient {
 
     async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
@@ -278,7 +297,9 @@ impl CommunicationClient for FileBasedClient {
 
             // Check timeout
             if start_time.elapsed() >= timeout_duration {
-                return Err(CommunicationError::Timeout("No response received".to_string()));
+                return Err(CommunicationError::Timeout(
+                    "No response received".to_string(),
+                ));
             }
 
             // Wait a bit before checking again

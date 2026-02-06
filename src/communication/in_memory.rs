@@ -18,11 +18,17 @@ impl CommunicationProtocol for InMemoryProtocol {
         ProtocolType::InMemory
     }
 
-    async fn create_server(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
+    async fn create_server(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
         Ok(Box::new(InMemoryServer::new(config)?))
     }
 
-    async fn create_client(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
+    async fn create_client(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
         Ok(Box::new(InMemoryClient::new(config)?))
     }
 }
@@ -46,18 +52,19 @@ impl InMemoryServer {
         })
     }
 
-    async fn handle_message(&self, message: CommunicationMessage) -> Result<CommunicationMessage, CommunicationError> {
+    async fn handle_message(
+        &self,
+        message: CommunicationMessage,
+    ) -> Result<CommunicationMessage, CommunicationError> {
         match message.message_type.as_str() {
             "command_line_args" => {
                 let response = CommunicationMessage::response(
-                    "Command line arguments received successfully".to_string()
+                    "Command line arguments received successfully".to_string(),
                 );
                 Ok(response)
             }
             _ => {
-                let error = CommunicationMessage::error(
-                    "Unsupported message type".to_string()
-                );
+                let error = CommunicationMessage::error("Unsupported message type".to_string());
                 Ok(error)
             }
         }
@@ -90,18 +97,19 @@ impl CommunicationServer for InMemoryServer {
                 // Receive message
                 let receiver_opt = message_receiver.lock().await.take();
                 if let Some(mut receiver) = receiver_opt {
-                    match timeout(
-                        Duration::from_millis(100),
-                        receiver.recv()
-                    ).await {
+                    match timeout(Duration::from_millis(100), receiver.recv()).await {
                         Ok(Some(message)) => {
                             // Handle the message and send response
-                            let response = Self::handle_message(&Self {
-                                config: CommunicationConfig::default(),
-                                message_sender: Arc::new(Mutex::new(None)),
-                                response_sender: Arc::new(Mutex::new(None)),
-                                is_running: is_running.clone(),
-                            }, message).await;
+                            let response = Self::handle_message(
+                                &Self {
+                                    config: CommunicationConfig::default(),
+                                    message_sender: Arc::new(Mutex::new(None)),
+                                    response_sender: Arc::new(Mutex::new(None)),
+                                    is_running: is_running.clone(),
+                                },
+                                message,
+                            )
+                            .await;
 
                             if let Ok(response) = response {
                                 let sender_opt = response_sender.lock().await.take();
@@ -128,11 +136,11 @@ impl CommunicationServer for InMemoryServer {
 
     async fn stop(&mut self) -> Result<(), CommunicationError> {
         *self.is_running.lock().await = false;
-        
+
         // Close channels
         *self.message_sender.lock().await = None;
         *self.response_sender.lock().await = None;
-        
+
         Ok(())
     }
 
@@ -166,16 +174,22 @@ impl InMemoryClient {
 
     async fn wait_for_response(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
-        
+
         let receiver_opt = self.response_receiver.lock().await.take();
         if let Some(mut receiver) = receiver_opt {
             match timeout(timeout_duration, receiver.recv()).await {
                 Ok(Some(message)) => Ok(message),
-                Ok(None) => Err(CommunicationError::ConnectionFailed("Server disconnected".to_string())),
-                Err(_) => Err(CommunicationError::Timeout("No response received".to_string())),
+                Ok(None) => Err(CommunicationError::ConnectionFailed(
+                    "Server disconnected".to_string(),
+                )),
+                Err(_) => Err(CommunicationError::Timeout(
+                    "No response received".to_string(),
+                )),
             }
         } else {
-            Err(CommunicationError::ConnectionFailed("Not connected".to_string()))
+            Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ))
         }
     }
 }
@@ -189,24 +203,35 @@ impl CommunicationClient for InMemoryClient {
         Ok(())
     }
 
-    async fn send_message(&mut self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_message(
+        &mut self,
+        message: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         let sender_opt = self.message_sender.lock().await.take();
         if let Some(sender) = sender_opt {
-            sender.send(message.clone()).await
+            sender
+                .send(message.clone())
+                .await
                 .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))?;
             Ok(())
         } else {
-            Err(CommunicationError::ConnectionFailed("Server not available".to_string()))
+            Err(CommunicationError::ConnectionFailed(
+                "Server not available".to_string(),
+            ))
         }
     }
 
     async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         self.wait_for_response().await

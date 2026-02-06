@@ -3,13 +3,13 @@
 //! Works on most platforms and provides fast inter-process communication
 
 use super::*;
+use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-use memmap2::{MmapMut, MmapOptions};
 
 /// Shared memory communication protocol implementation
 #[derive(Debug)]
@@ -21,11 +21,17 @@ impl CommunicationProtocol for SharedMemoryProtocol {
         ProtocolType::SharedMemory
     }
 
-    async fn create_server(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
+    async fn create_server(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
         Ok(Box::new(SharedMemoryServer::new(config)?))
     }
 
-    async fn create_client(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
+    async fn create_client(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
         Ok(Box::new(SharedMemoryClient::new(config)?))
     }
 }
@@ -75,18 +81,22 @@ impl SharedMemoryServer {
     async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
-        
+
         loop {
             // Check if server is still running
             if !*self.is_running.lock().await {
-                return Err(CommunicationError::ConnectionFailed("Server stopped".to_string()));
+                return Err(CommunicationError::ConnectionFailed(
+                    "Server stopped".to_string(),
+                ));
             }
 
             // Check if shared memory file exists
             if !Path::new(&self.shm_file).exists() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if start_time.elapsed() >= timeout_duration {
-                    return Err(CommunicationError::Timeout("No message received".to_string()));
+                    return Err(CommunicationError::Timeout(
+                        "No message received".to_string(),
+                    ));
                 }
                 continue;
             }
@@ -95,34 +105,35 @@ impl SharedMemoryServer {
             // We use tokio::task::spawn_blocking for this
             let shm_file = self.shm_file.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&shm_file)?;
+                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
                 // Check if there's data in shared memory
                 let data = mmap.as_ref();
-                if data[0] != 0 { // First byte indicates if there's data
+                if data[0] != 0 {
+                    // First byte indicates if there's data
                     // Read the message length (first 4 bytes)
                     let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
-                    
+
                     if len > 0 && len < 4096 {
                         // Read the message
                         let message_str = String::from_utf8_lossy(&data[5..5 + len]).into_owned();
-                        
+
                         // Clear the shared memory
                         mmap.as_mut()[0] = 0; // Clear data flag
                         mmap.flush()?;
 
                         // Parse and return the message
                         let message: CommunicationMessage = serde_json::from_str(&message_str)
-                            .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?;
+                            .map_err(|e| {
+                                CommunicationError::DeserializationFailed(e.to_string())
+                            })?;
                         return Ok(Some(message));
                     }
                 }
                 Ok(None)
-            }).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(Some(message))) => return Ok(message),
@@ -135,24 +146,26 @@ impl SharedMemoryServer {
 
             // Wait a bit before checking again
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             // Check timeout
             if start_time.elapsed() >= timeout_duration {
-                return Err(CommunicationError::Timeout("No message received".to_string()));
+                return Err(CommunicationError::Timeout(
+                    "No message received".to_string(),
+                ));
             }
         }
     }
 
-    async fn send_response(&self, response: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_response(
+        &self,
+        response: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
         let response_json = serde_json::to_string(response)?;
-        
+
         let result = tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&shm_file)?;
+            let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
             let response_bytes = response_json.as_bytes();
@@ -162,12 +175,13 @@ impl SharedMemoryServer {
             mmap.as_mut()[0] = 1; // Set data flag
             mmap.as_mut()[1..5].copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
             mmap.as_mut()[5..5 + response_bytes.len()].copy_from_slice(response_bytes);
-            
+
             mmap.flush()?;
-            
+
             Ok::<(), CommunicationError>(())
-        }).await;
-        
+        })
+        .await;
+
         match result {
             Ok(inner) => inner,
             Err(e) => Err(CommunicationError::IoError(e.to_string())),
@@ -196,26 +210,23 @@ impl CommunicationServer for SharedMemoryServer {
                     is_running: is_running.clone(),
                 };
                 match server.wait_for_message().await {
-                    Ok(message) => {
-                        match message.message_type.as_str() {
-                            "command_line_args" => {
-                                let response = CommunicationMessage::response(
-                                    "Command line arguments received successfully".to_string()
-                                );
-                                if let Err(e) = server.send_response(&response).await {
-                                    eprintln!("Failed to send response: {}", e);
-                                }
-                            }
-                            _ => {
-                                let error = CommunicationMessage::error(
-                                    "Unsupported message type".to_string()
-                                );
-                                if let Err(e) = server.send_response(&error).await {
-                                    eprintln!("Failed to send error response: {}", e);
-                                }
+                    Ok(message) => match message.message_type.as_str() {
+                        "command_line_args" => {
+                            let response = CommunicationMessage::response(
+                                "Command line arguments received successfully".to_string(),
+                            );
+                            if let Err(e) = server.send_response(&response).await {
+                                eprintln!("Failed to send response: {}", e);
                             }
                         }
-                    }
+                        _ => {
+                            let error =
+                                CommunicationMessage::error("Unsupported message type".to_string());
+                            if let Err(e) = server.send_response(&error).await {
+                                eprintln!("Failed to send error response: {}", e);
+                            }
+                        }
+                    },
                     Err(e) => {
                         // Only log if server is still running
                         if *is_running.lock().await {
@@ -278,13 +289,15 @@ impl SharedMemoryClient {
     async fn wait_for_response(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
-        
+
         loop {
             // Check if shared memory file exists
             if !Path::new(&self.shm_file).exists() {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 if start_time.elapsed() >= timeout_duration {
-                    return Err(CommunicationError::Timeout("No response received".to_string()));
+                    return Err(CommunicationError::Timeout(
+                        "No response received".to_string(),
+                    ));
                 }
                 continue;
             }
@@ -292,33 +305,40 @@ impl SharedMemoryClient {
             // Map the shared memory (blocking operation)
             let shm_file = self.shm_file.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&shm_file)?;
+                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
                 // Check if there's data in shared memory
-                if mmap.as_ref()[0] != 0 { // First byte indicates if there's data
+                if mmap.as_ref()[0] != 0 {
+                    // First byte indicates if there's data
                     // Read the message length (first 4 bytes)
-                    let len = u32::from_ne_bytes([mmap.as_ref()[1], mmap.as_ref()[2], mmap.as_ref()[3], mmap.as_ref()[4]]) as usize;
-                    
+                    let len = u32::from_ne_bytes([
+                        mmap.as_ref()[1],
+                        mmap.as_ref()[2],
+                        mmap.as_ref()[3],
+                        mmap.as_ref()[4],
+                    ]) as usize;
+
                     if len > 0 && len < 4096 {
                         // Read the message
-                        let message_str = String::from_utf8_lossy(&mmap.as_ref()[5..5 + len]).into_owned();
-                        
+                        let message_str =
+                            String::from_utf8_lossy(&mmap.as_ref()[5..5 + len]).into_owned();
+
                         // Clear the shared memory
                         mmap.as_mut()[0] = 0; // Clear data flag
                         mmap.flush()?;
 
                         // Parse and return the message
                         let message: CommunicationMessage = serde_json::from_str(&message_str)
-                            .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?;
+                            .map_err(|e| {
+                                CommunicationError::DeserializationFailed(e.to_string())
+                            })?;
                         return Ok(Some(message));
                     }
                 }
                 Ok(None)
-            }).await;
+            })
+            .await;
 
             match result {
                 Ok(Ok(Some(message))) => return Ok(message),
@@ -331,7 +351,9 @@ impl SharedMemoryClient {
 
             // Check timeout
             if start_time.elapsed() >= timeout_duration {
-                return Err(CommunicationError::Timeout("No response received".to_string()));
+                return Err(CommunicationError::Timeout(
+                    "No response received".to_string(),
+                ));
             }
 
             // Wait a bit before checking again
@@ -345,27 +367,31 @@ impl CommunicationClient for SharedMemoryClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         // Check if shared memory file exists
         if !Path::new(&self.shm_file).exists() {
-            return Err(CommunicationError::ConnectionFailed("Server not running".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Server not running".to_string(),
+            ));
         }
 
         self.connected = true;
         Ok(())
     }
 
-    async fn send_message(&mut self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_message(
+        &mut self,
+        message: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
         let message_json = serde_json::to_string(message)?;
-        
+
         let result = tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&shm_file)?;
+            let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
             let message_bytes = message_json.as_bytes();
@@ -375,12 +401,13 @@ impl CommunicationClient for SharedMemoryClient {
             mmap.as_mut()[0] = 1; // Set data flag
             mmap.as_mut()[1..5].copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
             mmap.as_mut()[5..5 + message_bytes.len()].copy_from_slice(message_bytes);
-            
+
             mmap.flush()?;
-            
+
             Ok::<(), CommunicationError>(())
-        }).await;
-        
+        })
+        .await;
+
         match result {
             Ok(inner) => inner,
             Err(e) => Err(CommunicationError::IoError(e.to_string())),
@@ -389,7 +416,9 @@ impl CommunicationClient for SharedMemoryClient {
 
     async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         self.wait_for_response().await

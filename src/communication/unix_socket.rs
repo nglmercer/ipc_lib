@@ -19,11 +19,17 @@ impl CommunicationProtocol for UnixSocketProtocol {
         ProtocolType::UnixSocket
     }
 
-    async fn create_server(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
+    async fn create_server(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
         Ok(Box::new(UnixSocketServer::new(config)?))
     }
 
-    async fn create_client(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
+    async fn create_client(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
         Ok(Box::new(UnixSocketClient::new(config)?))
     }
 }
@@ -49,7 +55,7 @@ impl Default for UnixSocketServer {
 impl UnixSocketServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
         let socket_path = Self::get_socket_path(&config.identifier);
-        
+
         // Clean up any existing socket file
         if Path::new(&socket_path).exists() {
             std::fs::remove_file(&socket_path)?;
@@ -68,12 +74,14 @@ impl UnixSocketServer {
 
     async fn handle_client(&self, mut stream: UnixStream) -> Result<(), CommunicationError> {
         let mut buffer = vec![0u8; 4096];
-        
+
         loop {
             match timeout(
                 Duration::from_millis(self.config.timeout_ms),
-                stream.read(&mut buffer)
-            ).await {
+                stream.read(&mut buffer),
+            )
+            .await
+            {
                 Ok(Ok(bytes_read)) => {
                     if bytes_read == 0 {
                         // Client disconnected
@@ -82,28 +90,27 @@ impl UnixSocketServer {
 
                     let message_str = String::from_utf8_lossy(&buffer[..bytes_read]);
                     match serde_json::from_str::<CommunicationMessage>(&message_str) {
-                        Ok(message) => {
-                            match message.message_type.as_str() {
-                                "command_line_args" => {
-                                    let response = CommunicationMessage::response(
-                                        "Command line arguments received successfully".to_string()
-                                    );
-                                    let response_json = serde_json::to_string(&response)?;
-                                    stream.write_all(response_json.as_bytes()).await?;
-                                }
-                                _ => {
-                                    let error = CommunicationMessage::error(
-                                        "Unsupported message type".to_string()
-                                    );
-                                    let error_json = serde_json::to_string(&error)?;
-                                    stream.write_all(error_json.as_bytes()).await?;
-                                }
+                        Ok(message) => match message.message_type.as_str() {
+                            "command_line_args" => {
+                                let response = CommunicationMessage::response(
+                                    "Command line arguments received successfully".to_string(),
+                                );
+                                let response_json = serde_json::to_string(&response)?;
+                                stream.write_all(response_json.as_bytes()).await?;
                             }
-                        }
+                            _ => {
+                                let error = CommunicationMessage::error(
+                                    "Unsupported message type".to_string(),
+                                );
+                                let error_json = serde_json::to_string(&error)?;
+                                stream.write_all(error_json.as_bytes()).await?;
+                            }
+                        },
                         Err(e) => {
-                            let error = CommunicationMessage::error(
-                                format!("Failed to parse message: {}", e)
-                            );
+                            let error = CommunicationMessage::error(format!(
+                                "Failed to parse message: {}",
+                                e
+                            ));
                             let error_json = serde_json::to_string(&error)?;
                             stream.write_all(error_json.as_bytes()).await?;
                         }
@@ -128,7 +135,7 @@ impl UnixSocketServer {
 impl CommunicationServer for UnixSocketServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
         let socket_path = Self::get_socket_path(&self.config.identifier);
-        
+
         let listener = UnixListener::bind(&socket_path)?;
         *self.listener.lock().await = Some(listener);
         *self.is_running.lock().await = true;
@@ -144,11 +151,16 @@ impl CommunicationServer for UnixSocketServer {
                     Ok((stream, _addr)) => {
                         let stream_clone = stream;
                         tokio::spawn(async move {
-                            if let Err(e) = Self::handle_client(&Self { 
-                                config: CommunicationConfig::default(),
-                                listener: Arc::new(Mutex::new(None)),
-                                is_running: Arc::new(Mutex::new(true)),
-                            }, stream_clone).await {
+                            if let Err(e) = Self::handle_client(
+                                &Self {
+                                    config: CommunicationConfig::default(),
+                                    listener: Arc::new(Mutex::new(None)),
+                                    is_running: Arc::new(Mutex::new(true)),
+                                },
+                                stream_clone,
+                            )
+                            .await
+                            {
                                 eprintln!("Error handling client: {}", e);
                             }
                         });
@@ -208,16 +220,21 @@ impl UnixSocketClient {
 impl CommunicationClient for UnixSocketClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         let socket_path = format!("/tmp/{}.sock", self.config.identifier);
-        
+
         let stream = UnixStream::connect(&socket_path).await?;
         self.stream = Some(stream);
         self.connected = true;
         Ok(())
     }
 
-    async fn send_message(&mut self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
+    async fn send_message(
+        &mut self,
+        message: &CommunicationMessage,
+    ) -> Result<(), CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         let stream = self.stream.as_mut().unwrap();
@@ -228,17 +245,19 @@ impl CommunicationClient for UnixSocketClient {
 
     async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
-            return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
+            return Err(CommunicationError::ConnectionFailed(
+                "Not connected".to_string(),
+            ));
         }
 
         let stream = self.stream.as_mut().unwrap();
         let mut buffer = vec![0u8; 4096];
         let bytes_read = stream.read(&mut buffer).await?;
-        
+
         let message_str = String::from_utf8_lossy(&buffer[..bytes_read]);
         let message: CommunicationMessage = serde_json::from_str(&message_str)
             .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?;
-        
+
         Ok(message)
     }
 

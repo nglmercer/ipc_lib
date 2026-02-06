@@ -1,8 +1,8 @@
 //! Single Instance Application Library
-//! 
+//!
 //! This library provides a robust single instance enforcement mechanism
 //! with multiple IPC communication protocols.
-//! 
+//!
 //! Features:
 //! - Single instance enforcement across multiple processes
 //! - Multiple communication protocols (Unix sockets, file-based, shared memory, etc.)
@@ -12,14 +12,11 @@
 
 pub mod communication;
 
-use communication::{
-    CommunicationError, CommunicationFactory,
-    CommunicationMessage,
-};
+use communication::{CommunicationError, CommunicationFactory, CommunicationMessage};
 
 // Re-export commonly used types for simpler imports
-pub use communication::ProtocolType;
 pub use communication::CommunicationConfig;
+pub use communication::ProtocolType;
 
 /// Message types for IPC communication (legacy compatibility)
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -171,9 +168,15 @@ impl SingleInstanceApp {
         match response.message_type.as_str() {
             "response" => Ok(response.payload.as_str().unwrap_or("").to_string()),
             "error" => Err(CommunicationError::ConnectionFailed(
-                response.payload.as_str().unwrap_or("Unknown error").to_string()
+                response
+                    .payload
+                    .as_str()
+                    .unwrap_or("Unknown error")
+                    .to_string(),
             )),
-            _ => Err(CommunicationError::ConnectionFailed("Unexpected response type".to_string())),
+            _ => Err(CommunicationError::ConnectionFailed(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 
@@ -184,13 +187,13 @@ impl SingleInstanceApp {
             // Send signal 0 to check if process exists
             unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
         }
-        
+
         #[cfg(windows)]
         {
             use std::ptr;
             use winapi::um::processthreadsapi::OpenProcess;
             use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
-            
+
             unsafe {
                 let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid);
                 if handle.is_null() {
@@ -215,7 +218,8 @@ impl SingleInstanceApp {
         let lock_file = format!("/tmp/{}.pid", self.identifier);
         let pid_str = std::fs::read_to_string(&lock_file)
             .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))?;
-        pid_str.parse::<u32>()
+        pid_str
+            .parse::<u32>()
             .map_err(|e| CommunicationError::ConnectionFailed(e.to_string()))
     }
 
@@ -262,9 +266,15 @@ impl IpcClient {
         match response.message_type.as_str() {
             "response" => Ok(response.payload.as_str().unwrap_or("").to_string()),
             "error" => Err(CommunicationError::ConnectionFailed(
-                response.payload.as_str().unwrap_or("Unknown error").to_string()
+                response
+                    .payload
+                    .as_str()
+                    .unwrap_or("Unknown error")
+                    .to_string(),
             )),
-            _ => Err(CommunicationError::ConnectionFailed("Unexpected response type".to_string())),
+            _ => Err(CommunicationError::ConnectionFailed(
+                "Unexpected response type".to_string(),
+            )),
         }
     }
 }
@@ -293,7 +303,7 @@ impl IpcServer {
 }
 
 /// Convenience function for simple single instance enforcement
-/// 
+///
 /// Returns Ok(true) if this is the primary instance,
 /// Ok(false) if this is a secondary instance (another instance is already running),
 /// Err(error) if enforcement failed.
@@ -312,7 +322,7 @@ mod tests {
     #[test]
     fn test_single_instance_app_new() {
         let app = SingleInstanceApp::new("test_app");
-        
+
         // Verify the identifier is set correctly
         // We can't directly access private fields, but we can verify through public methods
         assert_eq!(app.config().identifier, "test_app");
@@ -323,25 +333,23 @@ mod tests {
         let app = SingleInstanceApp::new("test_app")
             .with_protocol(ProtocolType::FileBased)
             .with_timeout(3000);
-        
+
         assert_eq!(app.config().protocol, ProtocolType::FileBased);
         assert_eq!(app.config().timeout_ms, 3000);
     }
 
     #[test]
     fn test_single_instance_app_without_fallback() {
-        let app = SingleInstanceApp::new("test_app")
-            .without_fallback();
-        
+        let app = SingleInstanceApp::new("test_app").without_fallback();
+
         assert!(!app.config().enable_fallback);
     }
 
     #[test]
     fn test_single_instance_app_with_fallback_protocols() {
         let protocols = vec![ProtocolType::FileBased, ProtocolType::InMemory];
-        let app = SingleInstanceApp::new("test_app")
-            .with_fallback_protocols(protocols.clone());
-        
+        let app = SingleInstanceApp::new("test_app").with_fallback_protocols(protocols.clone());
+
         assert_eq!(app.config().fallback_protocols, protocols);
     }
 
@@ -383,7 +391,7 @@ mod tests {
     fn test_message_command_line_args() {
         let args = vec!["arg1".to_string(), "arg2".to_string()];
         let message = Message::CommandLineArgs(args.clone());
-        
+
         match message {
             Message::CommandLineArgs(received_args) => {
                 assert_eq!(received_args, args);
@@ -395,7 +403,7 @@ mod tests {
     #[test]
     fn test_message_response() {
         let message = Message::Response("test response".to_string());
-        
+
         match message {
             Message::Response(content) => {
                 assert_eq!(content, "test response");
@@ -407,7 +415,7 @@ mod tests {
     #[test]
     fn test_message_error() {
         let message = Message::Error("test error".to_string());
-        
+
         match message {
             Message::Error(error_msg) => {
                 assert_eq!(error_msg, "test error");
@@ -421,7 +429,7 @@ mod tests {
         let message = Message::CommandLineArgs(vec!["test".to_string()]);
         let serialized = serde_json::to_string(&message);
         assert!(serialized.is_ok());
-        
+
         let deserialized: Result<Message, _> = serde_json::from_str(&serialized.unwrap());
         assert!(deserialized.is_ok());
         assert_eq!(deserialized.unwrap(), message);
@@ -465,7 +473,7 @@ mod tests {
     #[test]
     fn test_communication_config_default() {
         let config = CommunicationConfig::default();
-        
+
         assert_eq!(config.protocol, ProtocolType::UnixSocket);
         assert_eq!(config.identifier, "default");
         assert_eq!(config.timeout_ms, 5000);
@@ -482,7 +490,7 @@ mod tests {
             enable_fallback: false,
             fallback_protocols: vec![],
         };
-        
+
         assert_eq!(config.protocol, ProtocolType::FileBased);
         assert_eq!(config.identifier, "custom");
         assert_eq!(config.timeout_ms, 10000);
@@ -502,7 +510,7 @@ mod tests {
     fn test_communication_config_clone() {
         let config = CommunicationConfig::default();
         let cloned = config.clone();
-        
+
         assert_eq!(config.protocol, cloned.protocol);
         assert_eq!(config.identifier, cloned.identifier);
         assert_eq!(config.timeout_ms, cloned.timeout_ms);
@@ -514,11 +522,11 @@ mod tests {
     fn test_communication_message_command_line_args() {
         let args = vec!["--flag".to_string(), "value".to_string()];
         let message = CommunicationMessage::command_line_args(args.clone());
-        
+
         assert_eq!(message.message_type, "command_line_args");
         assert_eq!(message.source_id, "client");
         assert!(message.timestamp > 0);
-        
+
         let payload_args: Vec<String> = serde_json::from_value(message.payload).unwrap();
         assert_eq!(payload_args, args);
     }
@@ -526,11 +534,11 @@ mod tests {
     #[test]
     fn test_communication_message_response() {
         let message = CommunicationMessage::response("Success!".to_string());
-        
+
         assert_eq!(message.message_type, "response");
         assert_eq!(message.source_id, "server");
         assert!(message.timestamp > 0);
-        
+
         let payload_content: String = serde_json::from_value(message.payload).unwrap();
         assert_eq!(payload_content, "Success!");
     }
@@ -538,10 +546,10 @@ mod tests {
     #[test]
     fn test_communication_message_error() {
         let message = CommunicationMessage::error("Something went wrong".to_string());
-        
+
         assert_eq!(message.message_type, "error");
         assert_eq!(message.source_id, "server");
-        
+
         let payload_error: String = serde_json::from_value(message.payload).unwrap();
         assert_eq!(payload_error, "Something went wrong");
     }
@@ -551,10 +559,11 @@ mod tests {
         let message = CommunicationMessage::response("test".to_string());
         let serialized = serde_json::to_string(&message);
         assert!(serialized.is_ok());
-        
-        let deserialized: Result<CommunicationMessage, _> = serde_json::from_str(&serialized.unwrap());
+
+        let deserialized: Result<CommunicationMessage, _> =
+            serde_json::from_str(&serialized.unwrap());
         assert!(deserialized.is_ok());
-        
+
         let deserialized = deserialized.unwrap();
         assert_eq!(deserialized.message_type, "response");
         let content: String = serde_json::from_value(deserialized.payload).unwrap();
@@ -572,7 +581,7 @@ mod tests {
         let message1 = CommunicationMessage::command_line_args(vec![]);
         std::thread::sleep(std::time::Duration::from_millis(1));
         let message2 = CommunicationMessage::command_line_args(vec![]);
-        
+
         assert!(message2.timestamp >= message1.timestamp);
     }
 
@@ -616,7 +625,7 @@ mod tests {
             ProtocolType::FileBased,
             ProtocolType::InMemory,
         ];
-        
+
         for protocol in protocols {
             let result = communication::CommunicationFactory::create_protocol(protocol);
             assert!(result.is_ok());
@@ -626,14 +635,14 @@ mod tests {
     #[test]
     fn test_communication_factory_get_available_protocols() {
         let protocols = communication::CommunicationFactory::get_available_protocols();
-        
+
         // At minimum, should have FileBased and InMemory (always available)
         assert!(protocols.contains(&ProtocolType::FileBased));
         assert!(protocols.contains(&ProtocolType::InMemory));
-        
+
         #[cfg(unix)]
         assert!(protocols.contains(&ProtocolType::UnixSocket));
-        
+
         #[cfg(windows)]
         assert!(protocols.contains(&ProtocolType::NamedPipe));
     }
@@ -645,12 +654,12 @@ mod tests {
         // Test short identifier
         let app = SingleInstanceApp::new("a");
         assert_eq!(app.config().identifier, "a");
-        
+
         // Test long identifier
         let long_id = "a".repeat(100);
         let app = SingleInstanceApp::new(&long_id);
         assert_eq!(app.config().identifier, long_id);
-        
+
         // Test identifier with special characters
         let special_id = "app-with-dots_and_underscores.123";
         let app = SingleInstanceApp::new(special_id);
@@ -663,7 +672,7 @@ mod tests {
             .with_protocol(ProtocolType::FileBased)
             .with_timeout(1000)
             .without_fallback();
-        
+
         assert_eq!(app.config().protocol, ProtocolType::FileBased);
         assert_eq!(app.config().timeout_ms, 1000);
         assert!(!app.config().enable_fallback);

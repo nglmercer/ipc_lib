@@ -44,9 +44,15 @@ impl fmt::Display for CommunicationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CommunicationError::ConnectionFailed(msg) => write!(f, "Connection failed: {}", msg),
-            CommunicationError::SerializationFailed(msg) => write!(f, "Serialization failed: {}", msg),
-            CommunicationError::DeserializationFailed(msg) => write!(f, "Deserialization failed: {}", msg),
-            CommunicationError::ProtocolNotSupported(msg) => write!(f, "Protocol not supported: {}", msg),
+            CommunicationError::SerializationFailed(msg) => {
+                write!(f, "Serialization failed: {}", msg)
+            }
+            CommunicationError::DeserializationFailed(msg) => {
+                write!(f, "Deserialization failed: {}", msg)
+            }
+            CommunicationError::ProtocolNotSupported(msg) => {
+                write!(f, "Protocol not supported: {}", msg)
+            }
             CommunicationError::Timeout(msg) => write!(f, "Timeout: {}", msg),
             CommunicationError::ResourceNotFound(msg) => write!(f, "Resource not found: {}", msg),
             CommunicationError::PermissionDenied(msg) => write!(f, "Permission denied: {}", msg),
@@ -166,10 +172,16 @@ pub trait CommunicationProtocol: Send + Sync {
     fn protocol_type(&self) -> ProtocolType;
 
     /// Create a new server instance
-    async fn create_server(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationServer>, CommunicationError>;
+    async fn create_server(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationServer>, CommunicationError>;
 
     /// Create a new client instance
-    async fn create_client(&self, config: &CommunicationConfig) -> Result<Box<dyn CommunicationClient>, CommunicationError>;
+    async fn create_client(
+        &self,
+        config: &CommunicationConfig,
+    ) -> Result<Box<dyn CommunicationClient>, CommunicationError>;
 }
 
 /// Server interface for communication protocols
@@ -195,7 +207,10 @@ pub trait CommunicationClient: Send + Sync {
     async fn connect(&mut self) -> Result<(), CommunicationError>;
 
     /// Send a message to the server
-    async fn send_message(&mut self, message: &CommunicationMessage) -> Result<(), CommunicationError>;
+    async fn send_message(
+        &mut self,
+        message: &CommunicationMessage,
+    ) -> Result<(), CommunicationError>;
 
     /// Receive a message from the server
     async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError>;
@@ -212,13 +227,17 @@ pub struct CommunicationFactory;
 
 impl CommunicationFactory {
     /// Create a protocol implementation
-    pub fn create_protocol(protocol_type: ProtocolType) -> Result<Box<dyn CommunicationProtocol>, CommunicationError> {
+    pub fn create_protocol(
+        protocol_type: ProtocolType,
+    ) -> Result<Box<dyn CommunicationProtocol>, CommunicationError> {
         match protocol_type {
             ProtocolType::UnixSocket => Ok(Box::new(UnixSocketProtocol)),
             ProtocolType::SharedMemory => Ok(Box::new(SharedMemoryProtocol)),
             ProtocolType::FileBased => Ok(Box::new(FileBasedProtocol)),
             ProtocolType::InMemory => Ok(Box::new(InMemoryProtocol)),
-            _ => Err(CommunicationError::ProtocolNotSupported("Protocol not implemented".to_string())),
+            _ => Err(CommunicationError::ProtocolNotSupported(
+                "Protocol not implemented".to_string(),
+            )),
         }
     }
 
@@ -250,12 +269,12 @@ impl CommunicationFactory {
 }
 
 // Protocol implementations will be defined in separate modules
-mod unix_socket;
-mod shared_memory;
 mod file_based;
 mod in_memory;
+mod shared_memory;
+mod unix_socket;
 
-pub use unix_socket::UnixSocketProtocol;
-pub use shared_memory::SharedMemoryProtocol;
 pub use file_based::FileBasedProtocol;
 pub use in_memory::InMemoryProtocol;
+pub use shared_memory::SharedMemoryProtocol;
+pub use unix_socket::UnixSocketProtocol;
