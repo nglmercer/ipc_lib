@@ -2,7 +2,7 @@
 //! Provides efficient local communication on Unix-like systems
 
 use super::*;
-use std::path::Path;
+use crate::ipc_log;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -54,13 +54,6 @@ impl Default for UnixSocketServer {
 
 impl UnixSocketServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
-        let socket_path = Self::get_socket_path(&config.identifier);
-
-        // Clean up any existing socket file
-        if Path::new(&socket_path).exists() {
-            std::fs::remove_file(&socket_path)?;
-        }
-
         Ok(Self {
             config: config.clone(),
             listener: Arc::new(Mutex::new(None)),
@@ -98,6 +91,19 @@ impl UnixSocketServer {
                                 let response_json = serde_json::to_string(&response)?;
                                 stream.write_all(response_json.as_bytes()).await?;
                             }
+                            "chat" => {
+                                // For the chat example, we'll print the message to the console
+                                // In a real app, this might be broadcast to other clients
+                                if let Some(content) = message.payload.as_str() {
+                                    println!("\r[CHAT] {}: {}", message.source_id, content);
+                                    print!("> ");
+                                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                                }
+                                
+                                let response = CommunicationMessage::response("Message received".to_string());
+                                let response_json = serde_json::to_string(&response)?;
+                                stream.write_all(response_json.as_bytes()).await?;
+                            }
                             _ => {
                                 let error = CommunicationMessage::error(
                                     "Unsupported message type".to_string(),
@@ -121,7 +127,7 @@ impl UnixSocketServer {
                     break;
                 }
                 Err(_) => {
-                    eprintln!("Timeout reading from client");
+                    // Timeout reading from client, just break and let them reconnect if needed
                     break;
                 }
             }
@@ -136,6 +142,7 @@ impl CommunicationServer for UnixSocketServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
         let socket_path = Self::get_socket_path(&self.config.identifier);
 
+        ipc_log!("UnixSocketServer starting on {}", socket_path);
         let listener = UnixListener::bind(&socket_path)?;
         *self.listener.lock().await = Some(listener);
         *self.is_running.lock().await = true;
@@ -220,6 +227,7 @@ impl UnixSocketClient {
 impl CommunicationClient for UnixSocketClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         let socket_path = format!("/tmp/{}.sock", self.config.identifier);
+        ipc_log!("UnixSocketClient connecting to {}", socket_path);
 
         let stream = UnixStream::connect(&socket_path).await?;
         self.stream = Some(stream);

@@ -11,10 +11,10 @@
 use single_instance_app::{
     communication::ProtocolType,
     SingleInstanceApp,
+    IpcClient,
 };
 use std::env;
 use std::process;
-use tokio::time::Duration;
 use serde::{Deserialize, Serialize};
 
 /// Chat message structure
@@ -23,103 +23,23 @@ struct ChatMessage {
     sender_id: String,
     content: String,
     timestamp: u64,
-    message_type: MessageType,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum MessageType {
-    Chat,
-    System,
-}
-
-/// Start the chat server (primary instance)
-async fn start_server(identifier: &str, username: &str) {
-    println!("🎯 Starting chat server as primary instance...");
-    
-    let mut app = SingleInstanceApp::new(identifier)
-        .with_protocol(ProtocolType::UnixSocket)
-        .with_timeout(10000)
-        .with_fallback_protocols(vec![
-            ProtocolType::FileBased,
-            ProtocolType::SharedMemory,
-        ]);
-
-    match app.enforce_single_instance().await {
-        Ok(true) => {
-            println!("✅ Server started successfully!");
-            println!("🆔 Server PID: {}", process::id());
-            println!("👤 Username: {}", username);
-            println!("📍 Endpoint: {}", app.endpoint().unwrap_or_default());
-            println!();
-            println!("═══ Chat Commands ═══");
-            println!("  /msg <text> - Send a message to all");
-            println!("  /quit       - Exit the chat");
-            println!("═══════════════════════");
-            println!();
-            
-            // Send system message
-            println!("[SYSTEM] {} has started the chat server", username);
-        }
-        Ok(false) => {
-            println!("⚠️  Another instance is already running!");
-            return;
-        }
-        Err(e) => {
-            println!("❌ Failed to start server: {}", e);
-            return;
-        }
-    }
-}
-
-/// Connect to an existing chat server
-async fn connect_to_server(identifier: &str, username: &str) {
-    println!("🔌 Connecting to chat server...");
-    
-    let protocols = vec![
-        ProtocolType::UnixSocket,
-        ProtocolType::FileBased,
-        ProtocolType::SharedMemory,
-    ];
-
-    for protocol in protocols {
-        println!("  Trying {:?}...", protocol);
-        
-        let mut app = SingleInstanceApp::new(identifier)
-            .with_protocol(protocol)
-            .with_timeout(5000);
-
-        match app.enforce_single_instance().await {
-            Ok(true) => {
-                println!("✅ Connected! You are now hosting.");
-                return start_server(identifier, username).await;
-            }
-            Ok(false) => {
-                println!("✅ Connected to existing server!");
-                return;
-            }
-            Err(e) => {
-                println!("  ❌ {:?} failed: {}", protocol, e);
-                continue;
-            }
-        }
-    }
-
-    println!("❌ Could not connect to any server");
 }
 
 /// Client mode - send messages
-async fn run_client_chat(username: &str) {
-    println!("💬 Connected to chat as {}", username);
+async fn run_client_chat(username: &str, mut client: Option<IpcClient>) {
+    let is_primary = client.is_none();
+    println!("💬 Chat session as {} ({})", username, if is_primary { "Host" } else { "Client" });
     println!();
     println!("═══ Chat Commands ═══");
-    println!("  /msg <text> - Send a message");
+    println!("  <message>   - Send a message to the other instance");
     println!("  /quit       - Exit chat");
     println!("═══════════════════════");
+    println!();
     
     // Read user input
     loop {
         print!("> ");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        let _ = std::io::Write::flush(&mut std::io::stdout());
         
         let mut input = String::new();
         if std::io::stdin().read_line(&mut input).is_err() {
@@ -131,27 +51,28 @@ async fn run_client_chat(username: &str) {
             continue;
         }
 
-        if input.starts_with('/') {
-            let parts: Vec<&str> = input.splitn(2, ' ').collect();
-            match parts[0] {
-                "/msg" => {
-                    if parts.len() < 2 {
-                        println!("Usage: /msg <message>");
-                        continue;
-                    }
-                    let content = parts[1].to_string();
-                    println!("📤 You: {}", content);
-                }
-                "/quit" | "/exit" => {
-                    println!("👋 Goodbye!");
-                    break;
-                }
-                cmd => {
-                    println!("Unknown command: {}", cmd);
-                }
+        if input == "/quit" || input == "/exit" {
+            println!("👋 Goodbye!");
+            break;
+        }
+
+        if let Some(ref mut c) = client {
+            // Secondary instance: send to primary
+            let msg = single_instance_app::communication::CommunicationMessage {
+                message_type: "chat".to_string(),
+                payload: serde_json::json!(input),
+                timestamp: current_timestamp(),
+                source_id: username.to_string(),
+                metadata: serde_json::json!(null),
+            };
+            
+            match c.send_message(msg).await {
+                Ok(_) => println!("📤 Sent"),
+                Err(e) => println!("❌ Failed to send: {}", e),
             }
         } else {
-            println!("📤 You: {}", input);
+            // Primary instance: just print locally
+            println!("🏠 You (Server): {}", input);
         }
     }
 }
@@ -165,10 +86,7 @@ fn current_timestamp() -> u64 {
 
 #[tokio::main]
 async fn main() {
-    println!("╔══════════════════════════════════════════╗");
-    println!("║        IPC Chat Application             ║");
-    println!("║   Real-time messaging via IPC           ║");
-    println!("╚══════════════════════════════════════════╝");
+    println!("IPC Chat Application");
     println!();
 
     let args: Vec<String> = env::args().collect();
@@ -177,29 +95,41 @@ async fn main() {
     // Generate username or use provided one
     let username = args.get(1)
         .filter(|s| !s.starts_with("--"))
-        .map(|s| s.as_str())
+        .cloned()
         .unwrap_or_else(|| {
             static ADJECTIVES: &[&str] = &["Happy", "Bright", "Cool", "Swift", "Clever"];
             static NOUNS: &[&str] = &["User", "Chat", "Message", "Talk", "Post"];
-            let adj = ADJECTIVES[process::id() as usize % ADJECTIVES.len()];
-            let noun = NOUNS[process::id() as usize % NOUNS.len()];
-            let num = process::id() % 1000;
-            let username = format!("{}{}{}", adj, noun, num);
-            Box::leak(username.into_boxed_str())
+            let idx = process::id() as usize;
+            let adj = ADJECTIVES[idx % ADJECTIVES.len()];
+            let noun = NOUNS[idx % NOUNS.len()];
+            format!("{}{}{}", adj, noun, process::id() % 1000)
         });
 
-    // Check if joining existing server or starting new one
-    let joining = args.iter().any(|arg| arg == "--join");
+    let mut app = SingleInstanceApp::new(identifier)
+        .with_protocol(ProtocolType::UnixSocket)
+        .with_timeout(2000);
 
-    if joining {
-        connect_to_server(identifier, username).await;
-    } else {
-        start_server(identifier, username).await;
-    }
+    println!("🔍 Searching for chat session...");
 
-    // Run interactive chat
-    if !joining || process::id() % 2 == 0 {
-        run_client_chat(username).await;
+    match app.enforce_single_instance().await {
+        Ok(true) => {
+            println!("✅ No existing session found. You are now the host!");
+            println!("📍 Endpoint: {}", app.endpoint().unwrap_or_default());
+            println!("💡 To see debug logs, run with: IPC_DEBUG=1 cargo run...");
+            println!();
+            run_client_chat(&username, None).await;
+        }
+        Ok(false) => {
+            println!("✅ Found existing session. Joining...");
+            let client = IpcClient::new(identifier)
+                .expect("Failed to create client")
+                .with_protocol(app.config().protocol);
+            run_client_chat(&username, Some(client)).await;
+        }
+        Err(e) => {
+            println!("❌ Failed to initialize: {}", e);
+            println!("Try removing /tmp/{}.sock or /tmp/{}.pid if they are stale.", identifier, identifier);
+        }
     }
 
     println!("\n👋 Chat session ended");

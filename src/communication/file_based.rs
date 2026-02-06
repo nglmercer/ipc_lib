@@ -3,6 +3,7 @@
 //! Works on all platforms and doesn't require special permissions
 
 use super::*;
+use crate::ipc_log;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,14 +49,6 @@ impl FileBasedServer {
         let message_file = Self::get_message_file(&config.identifier);
         let lock_file = Self::get_lock_file(&config.identifier);
 
-        // Clean up any existing files
-        if Path::new(&message_file).exists() {
-            std::fs::remove_file(&message_file)?;
-        }
-        if Path::new(&lock_file).exists() {
-            std::fs::remove_file(&lock_file)?;
-        }
-
         Ok(Self {
             config: config.clone(),
             message_file,
@@ -72,32 +65,39 @@ impl FileBasedServer {
         format!("/tmp/{}.lock", identifier)
     }
 
-    async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
+    async fn wait_for_message(&self) -> Result<Option<CommunicationMessage>, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
 
         loop {
             // Check if server is still running
             if !*self.is_running.lock().await {
-                return Err(CommunicationError::ConnectionFailed(
-                    "Server stopped".to_string(),
-                ));
+                return Ok(None);
             }
 
             // Check if message file exists
             if Path::new(&self.message_file).exists() {
                 // Read the message using tokio async file operations
-                let mut file = tokio::fs::File::open(&self.message_file).await?;
-                let mut content = String::new();
-                file.read_to_string(&mut content).await?;
+                let content = match tokio::fs::read_to_string(&self.message_file).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        // File might have been deleted by another process/instance
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        continue;
+                    }
+                };
 
                 // Remove the message file
-                tokio::fs::remove_file(&self.message_file).await?;
+                let _ = tokio::fs::remove_file(&self.message_file).await;
+
+                if content.trim().is_empty() {
+                    continue;
+                }
 
                 // Parse and return the message
                 let message: CommunicationMessage = serde_json::from_str(&content)
                     .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?;
-                return Ok(message);
+                return Ok(Some(message));
             }
 
             // Wait a bit before checking again
@@ -105,9 +105,7 @@ impl FileBasedServer {
 
             // Check timeout
             if start_time.elapsed() >= timeout_duration {
-                return Err(CommunicationError::Timeout(
-                    "No message received".to_string(),
-                ));
+                return Ok(None);
             }
         }
     }
@@ -130,10 +128,25 @@ impl FileBasedServer {
 #[async_trait::async_trait]
 impl CommunicationServer for FileBasedServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
-        // Create lock file to indicate server is running using tokio
-        let mut lock_file = tokio::fs::File::create(&self.lock_file).await?;
-        lock_file.write_all(b"running").await?;
-        lock_file.flush().await?;
+        ipc_log!("FileBasedServer starting, lock_file: {}", self.lock_file);
+        // Try to create lock file exclusively to indicate server is running
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.lock_file)
+            .await
+        {
+            Ok(mut lock_file) => {
+                lock_file.write_all(b"running").await?;
+                lock_file.flush().await?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CommunicationError::ConnectionFailed(
+                    "Server lock file already exists".to_string(),
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
 
         *self.is_running.lock().await = true;
 
@@ -154,7 +167,7 @@ impl CommunicationServer for FileBasedServer {
                     is_running: is_running.clone(),
                 };
                 match server.wait_for_message().await {
-                    Ok(message) => match message.message_type.as_str() {
+                    Ok(Some(message)) => match message.message_type.as_str() {
                         "command_line_args" => {
                             let response = CommunicationMessage::response(
                                 "Command line arguments received successfully".to_string(),
@@ -162,6 +175,16 @@ impl CommunicationServer for FileBasedServer {
                             if let Err(e) = server.send_response(&response).await {
                                 eprintln!("Failed to send response: {}", e);
                             }
+                        }
+                        "chat" => {
+                            // Print chat message for example
+                            if let Some(content) = message.payload.as_str() {
+                                println!("\r[CHAT] {}: {}", message.source_id, content);
+                                print!("> ");
+                                let _ = std::io::Write::flush(&mut std::io::stdout());
+                            }
+                            let response = CommunicationMessage::response("Message received".to_string());
+                            let _ = server.send_response(&response).await;
                         }
                         _ => {
                             let error =
@@ -171,8 +194,13 @@ impl CommunicationServer for FileBasedServer {
                             }
                         }
                     },
+                    Ok(None) => {
+                        // Timeout or server stopped, just continue
+                    }
                     Err(e) => {
                         eprintln!("Error handling message: {}", e);
+                        // Sleep a bit to avoid tight loop on persistent error
+                        tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                 }
             }
@@ -240,6 +268,7 @@ impl CommunicationClient for FileBasedClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         // Check if lock file exists
         let lock_file = format!("/tmp/{}.lock", self.config.identifier);
+        ipc_log!("FileBasedClient connecting, checking lock_file: {}", lock_file);
         if !Path::new(&lock_file).exists() {
             return Err(CommunicationError::ConnectionFailed(
                 "Server not running".to_string(),
