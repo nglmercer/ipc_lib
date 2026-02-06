@@ -3,10 +3,9 @@
 //! Works on all platforms and doesn't require special permissions
 
 use super::*;
-use std::fs::File;
-use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -69,21 +68,23 @@ impl FileBasedServer {
 
     async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
+        let start_time = std::time::Instant::now();
         
         loop {
-            if !*self.is_running.blocking_lock() {
+            // Check if server is still running
+            if !*self.is_running.lock().await {
                 return Err(CommunicationError::ConnectionFailed("Server stopped".to_string()));
             }
 
             // Check if message file exists
             if Path::new(&self.message_file).exists() {
-                // Read the message
-                let mut file = File::open(&self.message_file)?;
+                // Read the message using tokio async file operations
+                let mut file = tokio::fs::File::open(&self.message_file).await?;
                 let mut content = String::new();
-                file.read_to_string(&mut content)?;
+                file.read_to_string(&mut content).await?;
 
                 // Remove the message file
-                std::fs::remove_file(&self.message_file)?;
+                tokio::fs::remove_file(&self.message_file).await?;
 
                 // Parse and return the message
                 let message: CommunicationMessage = serde_json::from_str(&content)
@@ -95,7 +96,7 @@ impl FileBasedServer {
             tokio::time::sleep(Duration::from_millis(100)).await;
             
             // Check timeout
-            if timeout_duration < Duration::from_millis(100) {
+            if start_time.elapsed() >= timeout_duration {
                 return Err(CommunicationError::Timeout("No message received".to_string()));
             }
         }
@@ -104,10 +105,10 @@ impl FileBasedServer {
     async fn send_response(&self, response: &CommunicationMessage) -> Result<(), CommunicationError> {
         let response_file = format!("{}.response", self.message_file);
         
-        // Create response file
-        let mut file = File::create(&response_file)?;
+        // Create response file using tokio async file operations
+        let mut file = tokio::fs::File::create(&response_file).await?;
         let response_json = serde_json::to_string(response)?;
-        file.write_all(response_json.as_bytes())?;
+        file.write_all(response_json.as_bytes()).await?;
         
         Ok(())
     }
@@ -116,10 +117,10 @@ impl FileBasedServer {
 #[async_trait::async_trait]
 impl CommunicationServer for FileBasedServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
-        // Create lock file to indicate server is running
-        let mut lock_file = File::create(&self.lock_file)?;
-        lock_file.write_all(b"running")?;
-        lock_file.flush()?;
+        // Create lock file to indicate server is running using tokio
+        let mut lock_file = tokio::fs::File::create(&self.lock_file).await?;
+        lock_file.write_all(b"running").await?;
+        lock_file.flush().await?;
         
         *self.is_running.lock().await = true;
 
@@ -127,28 +128,26 @@ impl CommunicationServer for FileBasedServer {
         let is_running = self.is_running.clone();
         let message_file = self.message_file.clone();
         let lock_file = self.lock_file.clone();
+        let config = self.config.clone();
 
         tokio::spawn(async move {
             while *is_running.lock().await {
-                // Wait for message
-                match Self::wait_for_message(&Self {
-                    config: CommunicationConfig::default(),
+                // Wait for message - clone config for each iteration
+                let server_config = config.clone();
+                let server = Self {
+                    config: server_config,
                     message_file: message_file.clone(),
                     lock_file: lock_file.clone(),
                     is_running: is_running.clone(),
-                }).await {
+                };
+                match server.wait_for_message().await {
                     Ok(message) => {
                         match message.message_type.as_str() {
                             "command_line_args" => {
                                 let response = CommunicationMessage::response(
                                     "Command line arguments received successfully".to_string()
                                 );
-                                if let Err(e) = Self::send_response(&Self {
-                                    config: CommunicationConfig::default(),
-                                    message_file: message_file.clone(),
-                                    lock_file: lock_file.clone(),
-                                    is_running: is_running.clone(),
-                                }, &response).await {
+                                if let Err(e) = server.send_response(&response).await {
                                     eprintln!("Failed to send response: {}", e);
                                 }
                             }
@@ -156,12 +155,7 @@ impl CommunicationServer for FileBasedServer {
                                 let error = CommunicationMessage::error(
                                     "Unsupported message type".to_string()
                                 );
-                                if let Err(e) = Self::send_response(&Self {
-                                    config: CommunicationConfig::default(),
-                                    message_file: message_file.clone(),
-                                    lock_file: lock_file.clone(),
-                                    is_running: is_running.clone(),
-                                }, &error).await {
+                                if let Err(e) = server.send_response(&error).await {
                                     eprintln!("Failed to send error response: {}", e);
                                 }
                             }
@@ -174,9 +168,9 @@ impl CommunicationServer for FileBasedServer {
             }
 
             // Clean up files when server stops
-            let _ = std::fs::remove_file(&message_file);
-            let _ = std::fs::remove_file(&lock_file);
-            let _ = std::fs::remove_file(&format!("{}.response", message_file));
+            let _ = tokio::fs::remove_file(&message_file).await;
+            let _ = tokio::fs::remove_file(&lock_file).await;
+            let _ = tokio::fs::remove_file(&format!("{}.response", message_file)).await;
         });
 
         Ok(())
@@ -188,7 +182,15 @@ impl CommunicationServer for FileBasedServer {
     }
 
     fn is_running(&self) -> bool {
-        *self.is_running.blocking_lock()
+        // Use a non-blocking attempt to check running status
+        // This is a best-effort check; in async contexts, prefer await
+        match self.is_running.try_lock() {
+            Ok(guard) => *guard,
+            Err(_) => {
+                // If we can't acquire the lock, assume it's running
+                true
+            }
+        }
     }
 
     fn endpoint(&self) -> String {
@@ -241,10 +243,10 @@ impl CommunicationClient for FileBasedClient {
             return Err(CommunicationError::ConnectionFailed("Not connected".to_string()));
         }
 
-        // Create message file
-        let mut file = File::create(&self.message_file)?;
+        // Create message file using tokio async file operations
+        let mut file = tokio::fs::File::create(&self.message_file).await?;
         let message_json = serde_json::to_string(message)?;
-        file.write_all(message_json.as_bytes())?;
+        file.write_all(message_json.as_bytes()).await?;
 
         Ok(())
     }
@@ -260,13 +262,13 @@ impl CommunicationClient for FileBasedClient {
         loop {
             // Check if response file exists
             if Path::new(&self.response_file).exists() {
-                // Read the response
-                let mut file = File::open(&self.response_file)?;
+                // Read the response using tokio async file operations
+                let mut file = tokio::fs::File::open(&self.response_file).await?;
                 let mut content = String::new();
-                file.read_to_string(&mut content)?;
+                file.read_to_string(&mut content).await?;
 
                 // Remove the response file
-                std::fs::remove_file(&self.response_file)?;
+                tokio::fs::remove_file(&self.response_file).await?;
 
                 // Parse and return the message
                 let message: CommunicationMessage = serde_json::from_str(&content)

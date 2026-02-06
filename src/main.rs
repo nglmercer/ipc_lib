@@ -4,9 +4,8 @@ use single_instance_app::{
 };
 use std::env;
 use std::process;
-use std::thread;
-use std::time::Duration;
 
+/// Basic example demonstrating single instance application with IPC communication
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -30,6 +29,7 @@ async fn main() {
         Ok(true) => {
             println!("Primary instance started successfully");
             println!("PID: {}", process::id());
+            println!("Endpoint: {}", app.endpoint().unwrap_or_default());
             
             // Simulate primary instance work
             primary_instance_work();
@@ -67,14 +67,10 @@ async fn main() {
 
 fn primary_instance_work() {
     println!("Primary instance is running...");
+    println!("Press Ctrl+C to exit");
     
-    // Simulate some work
-    for i in 1..=5 {
-        println!("Working... ({}/5)", i);
-        thread::sleep(Duration::from_secs(1));
-    }
-    
-    println!("Primary instance finished work");
+    // Keep the application running
+    std::thread::park();
 }
 
 async fn handle_secondary_instance(_args: &[String]) {
