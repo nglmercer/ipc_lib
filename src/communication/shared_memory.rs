@@ -316,28 +316,13 @@ impl SharedMemoryServer {
 
             #[cfg(windows)]
             {
-                // Try multiple times to open the mapping to avoid false negatives
-                let mut mapping_opened = false;
-                let mut mapping_handle = std::ptr::null_mut();
-                
-                for attempt in 0..3 {
-                    let mapping = unsafe {
-                        OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
-                    };
-                    
-                    if !mapping.is_null() {
-                        mapping_handle = mapping;
-                        mapping_opened = true;
-                        break;
-                    }
-                    
-                    // Small delay between attempts
-                    if attempt < 2 {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                }
+                // On Windows, open the mapping each time to avoid Send issues
+                // with raw pointers across async boundaries
+                let mapping = unsafe {
+                    OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
+                };
 
-                if !mapping_opened {
+                if mapping.is_null() {
                     tokio::time::sleep(poll_interval).await;
                     if start_time.elapsed() >= timeout_duration {
                         return Err(CommunicationError::Timeout(
@@ -347,11 +332,11 @@ impl SharedMemoryServer {
                     continue;
                 }
 
-                let view = unsafe { MapViewOfFile(mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
+                let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
 
                 if view.is_null() {
                     unsafe {
-                        CloseHandle(mapping_handle as *mut c_void);
+                        CloseHandle(mapping as *mut c_void);
                     }
                     tokio::time::sleep(poll_interval).await;
                     continue;
@@ -380,7 +365,7 @@ impl SharedMemoryServer {
                             UnmapViewOfFile(view);
                         }
                         unsafe {
-                            CloseHandle(mapping_handle as *mut c_void);
+                            CloseHandle(mapping as *mut c_void);
                         }
 
                         let message_res = match format {
@@ -409,7 +394,7 @@ impl SharedMemoryServer {
                     UnmapViewOfFile(view);
                 }
                 unsafe {
-                    CloseHandle(mapping_handle as *mut c_void);
+                    CloseHandle(mapping as *mut c_void);
                 }
             }
 
@@ -603,9 +588,12 @@ impl CommunicationServer for SharedMemoryServer {
         #[cfg(unix)]
         let shm_file = self.shm_file.clone();
         let message_handler = self.message_handler.clone();
-        #[cfg(windows)]
-        let mapping_handle = self.mapping_handle;
         let broadcast_tx = self.broadcast_tx.clone();
+
+        #[cfg(windows)]
+        let mapping_handle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+            self.mapping_handle as usize,
+        ));
 
         tokio::spawn(async move {
             while *is_running.lock().await {
@@ -652,13 +640,16 @@ impl CommunicationServer for SharedMemoryServer {
 
                 #[cfg(windows)]
                 {
+                    // Use atomic handle for thread safety
+                    let server_mapping_handle =
+                        mapping_handle.load(std::sync::atomic::Ordering::SeqCst);
                     let server_config = config.clone();
                     let server = Self {
                         config: server_config,
                         shm_name: shm_name.clone(),
                         is_running: is_running.clone(),
                         message_handler: message_handler.clone(),
-                        mapping_handle,
+                        mapping_handle: server_mapping_handle as isize,
                         broadcast_tx: broadcast_tx.clone(),
                     };
                     match server.wait_for_message().await {
