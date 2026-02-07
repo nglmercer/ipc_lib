@@ -1,6 +1,5 @@
 use single_instance_app::{
     communication::ProtocolType,
-    communication::CommunicationMessage,
     SingleInstanceApp,
 };
 use std::sync::{Arc, Mutex};
@@ -317,16 +316,60 @@ async fn main() {
         .with_protocol(ProtocolType::UnixSocket)
         .on_message(move |msg| {
             if msg.message_type == "render_frame" {
-                if let Some(pixels_val) = msg.payload.get("pixels") {
-                    if let Ok(pixels) = serde_json::from_value::<Vec<u8>>(pixels_val.clone()) {
+                println!("📥 Server: Received render_frame message ID: {}", msg.id);
+                
+                // Try Base64 encoded payload (optimized)
+                if let Some(pixels_b64_val) = msg.payload.get("pixels_b64") {
+                    if let Some(b64_str) = pixels_b64_val.as_str() {
+                        use base64::{Engine as _, engine::general_purpose};
+                        if let Ok(pixels) = general_purpose::STANDARD.decode(b64_str) {
+                            if pixels.len() != 512 * 512 * 4 {
+                                eprintln!("⚠️ Received frame with wrong size: {}", pixels.len());
+                                return None;
+                            }
+                            
+                            let mut p = pixels_for_ipc.lock().unwrap();
+                            *p = pixels;
+                            let mut f = flag_for_ipc.lock().unwrap();
+                            *f = true;
+                            
+                            // println!("Frame updated!");
+                            return Some(msg.create_reply(serde_json::json!({"status": "received"})));
+                        } else {
+                            eprintln!("⚠️ Failed to decode Base64 pixels");
+                        }
+                    } else {
+                        eprintln!("⚠️ 'pixels_b64' is not a string");
+                    }
+                }
+                // Fallback for legacy JSON array (slow)
+                else if let Some(pixels_val) = msg.payload.get("pixels") {
+                    // Check if it's an array
+                    if let Some(arr) = pixels_val.as_array() {
+                        if arr.len() != 512 * 512 * 4 {
+                            eprintln!("⚠️ Received frame with wrong size: {}", arr.len());
+                            return None;
+                        }
+                        
+                        // Manually convert to Vec<u8> to be safer/faster than full deserialization
+                        let pixels: Vec<u8> = arr.iter()
+                            .map(|v| v.as_u64().unwrap_or(0) as u8)
+                            .collect();
+
                         let mut p = pixels_for_ipc.lock().unwrap();
                         *p = pixels;
                         let mut f = flag_for_ipc.lock().unwrap();
                         *f = true;
                         
+                        // println!("Frame updated!");
+
                         // Return a confirmation response
                         return Some(msg.create_reply(serde_json::json!({"status": "received"})));
+                    } else {
+                        eprintln!("⚠️ 'pixels' is not an array");
                     }
+                } else {
+                    eprintln!("⚠️ Payload missing 'pixels' or 'pixels_b64'");
                 }
             }
             None
