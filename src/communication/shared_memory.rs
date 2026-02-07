@@ -144,7 +144,6 @@ impl SharedMemoryServer {
                 lock_file,
                 is_running: Arc::new(Mutex::new(false)),
                 message_handler: Arc::new(Mutex::new(None)),
-                mapping_handle: 0,
                 broadcast_tx: tokio::sync::broadcast::channel(100).0,
             })
         }
@@ -206,9 +205,10 @@ impl SharedMemoryServer {
         let file = OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&self.lock_file)?;
         use std::os::unix::fs::FileExt;
-        file.lock_exclusive()?;
+        // File locking is handled by OpenOptions with write access
         Ok(file)
     }
 
@@ -256,6 +256,7 @@ impl SharedMemoryServer {
                     }
                 };
 
+                let shm_file = self.shm_file.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     use memmap2::MmapOptions;
                     use std::fs::OpenOptions;
@@ -521,7 +522,6 @@ impl SharedMemoryServer {
             let broadcast_file = format!("{}.broadcast", self.shm_file);
             let file = OpenOptions::new()
                 .read(true)
-                .write(true)
                 .create(true)
                 .append(true)
                 .open(&broadcast_file)?;
@@ -588,6 +588,8 @@ impl CommunicationServer for SharedMemoryServer {
         let shm_name = self.shm_name.clone();
         #[cfg(unix)]
         let shm_file = self.shm_file.clone();
+        #[cfg(unix)]
+        let lock_file = self.lock_file.clone();
         let message_handler = self.message_handler.clone();
         let broadcast_tx = self.broadcast_tx.clone();
 
@@ -607,8 +609,9 @@ impl CommunicationServer for SharedMemoryServer {
                         shm_name: shm_name.clone(),
                         is_running: is_running.clone(),
                         message_handler: message_handler.clone(),
-                        mapping_handle: 0,
                         broadcast_tx: broadcast_tx.clone(),
+                        #[cfg(unix)]
+                        lock_file: lock_file.clone(),
                     };
                     match server.wait_for_message().await {
                         Ok(message) => {
@@ -836,6 +839,7 @@ impl SharedMemoryClient {
         let start_time = std::time::Instant::now();
         let format = self.config.serialization_format;
         let shm_file = self.shm_file.clone();
+        let broadcast_shm_file = shm_file.clone();
 
         loop {
             // First check if server is still alive
@@ -848,7 +852,7 @@ impl SharedMemoryClient {
             // Check for broadcasts from the broadcast file (Unix)
             #[cfg(unix)]
             {
-                let broadcast_file = format!("{}.broadcast", shm_file);
+                let broadcast_file = format!("{}.broadcast", broadcast_shm_file);
                 if Path::new(&broadcast_file).exists() {
                     use std::fs::OpenOptions;
                     use std::os::unix::fs::FileExt;
@@ -871,7 +875,7 @@ impl SharedMemoryClient {
                                     let len = u32::from_ne_bytes(len_bytes) as usize;
                                     let msg_start = last_pos + 4;
 
-                                    if msg_start + len <= metadata as usize {
+                                    if msg_start + len as u64 <= metadata {
                                         let mut msg_bytes = vec![0u8; len];
                                         if file.read_exact_at(&mut msg_bytes, msg_start).is_ok() {
                                             let message_res = match format {
@@ -914,7 +918,7 @@ impl SharedMemoryClient {
                                                         .unwrap()
                                                         .insert(id);
                                                     self.last_broadcast_position.store(
-                                                        msg_start + len,
+                                                        msg_start + len as u64,
                                                         std::sync::atomic::Ordering::SeqCst,
                                                     );
                                                     return Ok(msg);
@@ -957,11 +961,15 @@ impl SharedMemoryClient {
                     continue;
                 }
 
+                let shm_file_for_spawn = shm_file.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     use memmap2::MmapOptions;
                     use std::fs::OpenOptions;
 
-                    let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&shm_file_for_spawn)?;
                     let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
                     let data = mmap.as_ref();
                     let data_flag = data[DATA_FLAG_OFFSET];
