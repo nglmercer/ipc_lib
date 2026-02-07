@@ -131,7 +131,7 @@ impl CommunicationConfig {
         }
         #[cfg(unix)]
         {
-            ProtocolType::UnixSocket
+            ProtocolType::SharedMemory // SharedMemory is now the default on Unix too!
         }
     }
 

@@ -936,10 +936,8 @@ mod tests {
         let config = CommunicationConfig::default();
         let debug_format = format!("{:?}", config);
 
-        #[cfg(unix)]
-        assert!(debug_format.contains("UnixSocket"));
-        #[cfg(windows)]
-        assert!(debug_format.contains("FileBased"));
+        // SharedMemory is the default on both platforms now
+        assert!(debug_format.contains("SharedMemory"));
 
         assert!(debug_format.contains("default"));
     }
