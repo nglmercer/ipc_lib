@@ -7,6 +7,10 @@ on:
         description: "Name of the built artifact"
         value: ${{ jobs.build.outputs.artifact_name }}
 
+env:
+  LIB_NAME: librust_ipc_bindings
+  LIB_PATH: target/release
+
 jobs:
   build:
     name: Build Bun Bindings (${{ matrix.os }})
@@ -17,13 +21,10 @@ jobs:
         include:
           - os: ubuntu-latest
             suffix: so
-            lib_dir: target/release
           - os: macos-latest
             suffix: dylib
-            lib_dir: target/release
           - os: windows-latest
             suffix: dll
-            lib_dir: target/release
 
     steps:
       - name: Checkout repository
@@ -39,9 +40,9 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: librust_ipc_bindings-${{ matrix.os }}
+          name: ${{ env.LIB_NAME }}-${{ matrix.os }}
           path: |
-            target/release/librust_ipc_bindings.${{ matrix.suffix }}
+            ${{ env.LIB_PATH }}/${{ env.LIB_NAME }}.${{ matrix.suffix }}
           retention-days: 1
 
   test-bun-example:
@@ -61,13 +62,13 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: librust_ipc_bindings-*
-          path: bindings_uniffi/target/release/
+          pattern: ${{ env.LIB_NAME }}-
+          path: ${{ env.LIB_PATH }}/
           merge-multiple: true
 
       - name: Verify library exists
         run: |
-          ls -la bindings_uniffi/target/release/
+          ls -la ${{ env.LIB_PATH }}/
 
       - name: Run Bun lint
         working-directory: bindings_uniffi/examples
