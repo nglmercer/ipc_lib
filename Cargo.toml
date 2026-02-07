@@ -35,6 +35,9 @@ winapi = { version = "0.3", features = [
     "winnt",
     "handleapi",
     "memoryapi",
+    "winbase",
+    "libloaderapi",
+    "fileapi",
 ] }
 
 [dev-dependencies]

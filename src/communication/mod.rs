@@ -127,7 +127,7 @@ impl CommunicationConfig {
     pub fn default_protocol() -> ProtocolType {
         #[cfg(windows)]
         {
-            ProtocolType::FileBased // Use FileBased on Windows (cross-platform)
+            ProtocolType::SharedMemory // SharedMemory now works on Windows!
         }
         #[cfg(unix)]
         {
@@ -137,22 +137,21 @@ impl CommunicationConfig {
 
     /// Get the default fallback protocols for the current platform
     pub fn default_fallback_protocols() -> Vec<ProtocolType> {
-        let protocols = vec![
-            ProtocolType::FileBased,
-            ProtocolType::InMemory,
-        ];
-
         #[cfg(unix)]
         {
-            let mut protocols = protocols;
-            protocols.push(ProtocolType::UnixSocket);
-            protocols.push(ProtocolType::SharedMemory);
-            protocols
+            vec![
+                ProtocolType::FileBased,
+                ProtocolType::InMemory,
+                ProtocolType::SharedMemory,
+            ]
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            protocols
+            vec![
+                ProtocolType::FileBased,
+                ProtocolType::InMemory,
+            ]
         }
     }
 }
@@ -335,14 +334,14 @@ impl CommunicationFactory {
                 }
             }
             ProtocolType::SharedMemory => {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 {
                     Ok(Box::new(SharedMemoryProtocol))
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 {
                     Err(CommunicationError::ProtocolNotSupported(
-                        "SharedMemory is only supported on Unix-like systems".to_string(),
+                        "SharedMemory is only supported on Unix-like systems and Windows".to_string(),
                     ))
                 }
             }
@@ -367,24 +366,24 @@ impl CommunicationFactory {
     }
 
     /// Get available protocols for the current platform
+    #[cfg(unix)]
     pub fn get_available_protocols() -> Vec<ProtocolType> {
-        let mut protocols = Vec::new();
+        vec![
+            ProtocolType::UnixSocket,
+            ProtocolType::SharedMemory,
+            ProtocolType::FileBased,
+            ProtocolType::InMemory,
+        ]
+    }
 
-        // Unix sockets are available on Unix-like systems
-        #[cfg(unix)]
-        protocols.push(ProtocolType::UnixSocket);
-
-        // Shared memory is available on Unix-like systems
-        #[cfg(unix)]
-        protocols.push(ProtocolType::SharedMemory);
-
-        // File-based communication is always available
-        protocols.push(ProtocolType::FileBased);
-
-        // In-memory is always available (for testing)
-        protocols.push(ProtocolType::InMemory);
-
-        protocols
+    /// Get available protocols for the current platform (Windows)
+    #[cfg(not(unix))]
+    pub fn get_available_protocols() -> Vec<ProtocolType> {
+        vec![
+            ProtocolType::SharedMemory,
+            ProtocolType::FileBased,
+            ProtocolType::InMemory,
+        ]
     }
 }
 
