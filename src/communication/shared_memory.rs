@@ -115,7 +115,10 @@ impl SharedMemoryServer {
 
             // Map the shared memory (this is blocking, but memmap2 doesn't have async)
             // We use tokio::task::spawn_blocking for this
+            // Map the shared memory (blocking operation)
+            // We use tokio::task::spawn_blocking for this
             let shm_file = self.shm_file.clone();
+            let format = self.config.serialization_format;
             let result = tokio::task::spawn_blocking(move || {
                 let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
@@ -128,19 +131,29 @@ impl SharedMemoryServer {
                     let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
 
                     if len > 0 && len < 4096 {
-                        // Read the message
-                        let message_str = String::from_utf8_lossy(&data[5..5 + len]).into_owned();
+                        // Read the message data (Clone to vector to avoid borrow checker issues)
+                        let message_bytes = data[5..5 + len].to_vec();
 
-                        // Clear the shared memory
+                        // Clear the shared memory flag immediately
                         mmap.as_mut()[0] = 0; // Clear data flag
                         mmap.flush()?;
 
-                        // Parse and return the message
-                        let message: CommunicationMessage = serde_json::from_str(&message_str)
-                            .map_err(|e| {
-                                CommunicationError::DeserializationFailed(e.to_string())
-                            })?;
-                        return Ok(Some(message));
+                        // Parse the message based on format (using the owned vector)
+                        let message_res = match format {
+                            SerializationFormat::Json => {
+                                let message_str = String::from_utf8_lossy(&message_bytes);
+                                serde_json::from_str::<CommunicationMessage>(&message_str).map_err(
+                                    |e| CommunicationError::DeserializationFailed(e.to_string()),
+                                )
+                            }
+                            SerializationFormat::MsgPack => {
+                                rmp_serde::from_slice::<CommunicationMessage>(&message_bytes)
+                                    .map_err(|e| {
+                                        CommunicationError::DeserializationFailed(e.to_string())
+                                    })
+                            }
+                        };
+                        return Ok(Some(message_res?));
                     }
                 }
                 Ok(None)
@@ -174,19 +187,26 @@ impl SharedMemoryServer {
     ) -> Result<(), CommunicationError> {
         // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
-        let response_json = serde_json::to_string(response)?;
+        let format = self.config.serialization_format;
+
+        let response_bytes = match format {
+            SerializationFormat::Json => {
+                let s = serde_json::to_string(response)?;
+                s.into_bytes()
+            }
+            SerializationFormat::MsgPack => rmp_serde::to_vec(response)
+                .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
+        };
 
         let result = tokio::task::spawn_blocking(move || {
             let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-            let response_bytes = response_json.as_bytes();
-
             // Write the response to shared memory
             // Format: [data_flag(1)][length(4)][data(n)]
             mmap.as_mut()[0] = 1; // Set data flag
             mmap.as_mut()[1..5].copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
-            mmap.as_mut()[5..5 + response_bytes.len()].copy_from_slice(response_bytes);
+            mmap.as_mut()[5..5 + response_bytes.len()].copy_from_slice(&response_bytes);
 
             mmap.flush()?;
 
@@ -325,6 +345,7 @@ impl SharedMemoryClient {
 
             // Map the shared memory (blocking operation)
             let shm_file = self.shm_file.clone();
+            let format = self.config.serialization_format;
             let result = tokio::task::spawn_blocking(move || {
                 let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
@@ -341,20 +362,29 @@ impl SharedMemoryClient {
                     ]) as usize;
 
                     if len > 0 && len < 4096 {
-                        // Read the message
-                        let message_str =
-                            String::from_utf8_lossy(&mmap.as_ref()[5..5 + len]).into_owned();
+                        // Read the message bytes (Clone to vector to avoid borrow checker issues)
+                        let message_bytes = mmap.as_ref()[5..5 + len].to_vec();
 
-                        // Clear the shared memory
+                        // Clear the shared memory flag immediately
                         mmap.as_mut()[0] = 0; // Clear data flag
                         mmap.flush()?;
 
                         // Parse and return the message
-                        let message: CommunicationMessage = serde_json::from_str(&message_str)
-                            .map_err(|e| {
-                                CommunicationError::DeserializationFailed(e.to_string())
-                            })?;
-                        return Ok(Some(message));
+                        let message_res = match format {
+                            SerializationFormat::Json => {
+                                let message_str = String::from_utf8_lossy(&message_bytes);
+                                serde_json::from_str::<CommunicationMessage>(&message_str).map_err(
+                                    |e| CommunicationError::DeserializationFailed(e.to_string()),
+                                )
+                            }
+                            SerializationFormat::MsgPack => {
+                                rmp_serde::from_slice::<CommunicationMessage>(&message_bytes)
+                                    .map_err(|e| {
+                                        CommunicationError::DeserializationFailed(e.to_string())
+                                    })
+                            }
+                        };
+                        return Ok(Some(message_res?));
                     }
                 }
                 Ok(None)
@@ -397,10 +427,7 @@ impl CommunicationClient for SharedMemoryClient {
         Ok(())
     }
 
-    async fn send_message(
-        &self,
-        message: &CommunicationMessage,
-    ) -> Result<(), CommunicationError> {
+    async fn send_message(&self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
         if !self.connected {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),
@@ -409,19 +436,32 @@ impl CommunicationClient for SharedMemoryClient {
 
         // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
-        let message_json = serde_json::to_string(message)?;
+        let format = self.config.serialization_format;
+
+        // Serialize first to avoid borrowing issues in closure if we passed &message
+        // But message is &CommunicationMessage. We can't move it.
+        // We can serialize here before spawning, but spawning is for blocking IO (open file).
+        // Serialization is CPU bound. Doing it here is fine or inside.
+        // Let's clone message to move into closure? No, expensive.
+        // Serialize to bytes here.
+        let message_bytes = match format {
+            SerializationFormat::Json => {
+                let s = serde_json::to_string(message)?;
+                s.into_bytes()
+            }
+            SerializationFormat::MsgPack => rmp_serde::to_vec(message)
+                .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
+        };
 
         let result = tokio::task::spawn_blocking(move || {
             let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-            let message_bytes = message_json.as_bytes();
-
             // Write the message to shared memory
             // Format: [data_flag(1)][length(4)][data(n)]
             mmap.as_mut()[0] = 1; // Set data flag
             mmap.as_mut()[1..5].copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
-            mmap.as_mut()[5..5 + message_bytes.len()].copy_from_slice(message_bytes);
+            mmap.as_mut()[5..5 + message_bytes.len()].copy_from_slice(&message_bytes);
 
             mmap.flush()?;
 

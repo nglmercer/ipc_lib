@@ -48,6 +48,7 @@ use tokio::time::{timeout, Duration};
 pub use communication::current_timestamp;
 pub use communication::CommunicationConfig;
 pub use communication::ProtocolType;
+pub use communication::SerializationFormat;
 
 /// Message types for IPC communication (legacy compatibility)
 #[derive(Debug, PartialEq, Clone, serde::Serialize, serde::Deserialize)]
@@ -93,6 +94,12 @@ impl SingleInstanceApp {
     /// Configure the communication protocol
     pub fn with_protocol(mut self, protocol: ProtocolType) -> Self {
         self.config.protocol = protocol;
+        self
+    }
+
+    /// Configure the serialization format
+    pub fn with_serialization_format(mut self, format: SerializationFormat) -> Self {
+        self.config.serialization_format = format;
         self
     }
 
@@ -480,6 +487,18 @@ impl IpcClient {
         self
     }
 
+    /// Configure the serialization format
+    pub fn with_serialization_format(mut self, format: communication::SerializationFormat) -> Self {
+        self.config.serialization_format = format;
+        self
+    }
+
+    /// Configure timeout for communication operations
+    pub fn with_timeout(mut self, timeout_ms: u64) -> Self {
+        self.config.timeout_ms = timeout_ms;
+        self
+    }
+
     /// Send a custom message to the primary instance (legacy simple version)
     pub async fn send_message(
         &mut self,
@@ -739,6 +758,7 @@ mod tests {
     fn test_communication_config_custom() {
         let config = CommunicationConfig {
             protocol: ProtocolType::FileBased,
+            serialization_format: SerializationFormat::Json,
             identifier: "custom".to_string(),
             timeout_ms: 10000,
             enable_fallback: false,

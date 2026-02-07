@@ -203,10 +203,7 @@ impl CommunicationClient for InMemoryClient {
         Ok(())
     }
 
-    async fn send_message(
-        &self,
-        message: &CommunicationMessage,
-    ) -> Result<(), CommunicationError> {
+    async fn send_message(&self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
         if !self.connected {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),

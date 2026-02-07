@@ -4,7 +4,7 @@
 use super::*;
 use crate::ipc_log;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -88,54 +88,101 @@ impl UnixSocketServer {
         use tokio::io::AsyncBufReadExt;
         let (reader, mut writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        let mut line = String::new();
 
         loop {
             tokio::select! {
                 // Read from client
-                read_result = reader.read_line(&mut line) => {
-                    match read_result {
-                        Ok(bytes_read) => {
-                            if bytes_read == 0 { break; }
-
-                            let message_res = serde_json::from_str::<CommunicationMessage>(&line);
-                            line.clear();
-
-                            if let Ok(message) = message_res {
-                                ipc_log!("Received message type: {}", message.message_type);
-
-                                // Call message handler if set and get optional response
-                                let response = if let Some(ref handler) = *self.message_handler.lock().await {
-                                    handler(message.clone())
-                                } else {
-                                    None
-                                };
-
-                                // Default response if none provided by handler
-                                let response = response.unwrap_or_else(|| {
-                                    message.create_reply(serde_json::json!("Received"))
-                                });
-
-                                // Broadcast to other clients (original message)
-                                let _ = self.broadcast_tx.send(message);
-
-                                // Send response back to client
-                                let mut resp_json = serde_json::to_string(&response)?;
-                                resp_json.push('\n');
-                                let _ = writer.write_all(resp_json.as_bytes()).await;
+                read_result = async {
+                    match self.config.serialization_format {
+                        SerializationFormat::Json => {
+                            let mut line = String::new();
+                            match reader.read_line(&mut line).await {
+                                Ok(0) => Ok(None),
+                                Ok(_) => Ok(Some(serde_json::from_str::<CommunicationMessage>(&line)
+                                    .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?)),
+                                Err(e) => Err(CommunicationError::IoError(e.to_string())),
                             }
                         }
-                        Err(_) => break,
+                        SerializationFormat::MsgPack => {
+                            let mut len_bytes = [0u8; 4];
+                            match reader.read_exact(&mut len_bytes).await {
+                                Ok(_) => {
+                                    let len = u32::from_be_bytes(len_bytes) as usize;
+                                    let mut buf = vec![0u8; len];
+                                    match reader.read_exact(&mut buf).await {
+                                        Ok(_) => {
+                                            Ok(Some(rmp_serde::from_slice::<CommunicationMessage>(&buf)
+                                                .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))?))
+                                        }
+                                        Err(e) => Err(CommunicationError::IoError(e.to_string())),
+                                    }
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+                                Err(e) => Err(CommunicationError::IoError(e.to_string())),
+                            }
+                        }
+                    }
+                } => {
+                    match read_result {
+                        Ok(Some(message)) => {
+                            ipc_log!("Received message type: {}", message.message_type);
+
+                            // Call message handler if set and get optional response
+                            let response = if let Some(ref handler) = *self.message_handler.lock().await {
+                                handler(message.clone())
+                            } else {
+                                None
+                            };
+
+                            // Default response if none provided by handler
+                            let response = response.unwrap_or_else(|| {
+                                message.create_reply(serde_json::json!("Received"))
+                            });
+
+                            // Broadcast to other clients (original message)
+                            let _ = self.broadcast_tx.send(message);
+
+                            // Send response back to client
+                            match self.config.serialization_format {
+                                SerializationFormat::Json => {
+                                    let mut resp_json = serde_json::to_string(&response)?;
+                                    resp_json.push('\n');
+                                    let _ = writer.write_all(resp_json.as_bytes()).await;
+                                }
+                                SerializationFormat::MsgPack => {
+                                    let resp_bytes = rmp_serde::to_vec(&response)
+                                        .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?;
+                                    let len = resp_bytes.len() as u32;
+                                    let _ = writer.write_all(&len.to_be_bytes()).await;
+                                    let _ = writer.write_all(&resp_bytes).await;
+                                }
+                            }
+                        }
+                        Ok(None) => break, // Connection closed
+                        Err(_) => break, // Error or closed
                     }
                 }
                 // Receive broadcast and send to client
                 broadcast_msg = broadcast_rx.recv() => {
                     match broadcast_msg {
                         Ok(msg) => {
-                            let mut msg_json = serde_json::to_string(&msg)?;
-                            msg_json.push('\n');
-                            if writer.write_all(msg_json.as_bytes()).await.is_err() {
-                                break;
+                            match self.config.serialization_format {
+                                SerializationFormat::Json => {
+                                    let mut msg_json = serde_json::to_string(&msg)?;
+                                    msg_json.push('\n');
+                                    if writer.write_all(msg_json.as_bytes()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                SerializationFormat::MsgPack => {
+                                    if let Ok(msg_bytes) = rmp_serde::to_vec(&msg) {
+                                        let len = msg_bytes.len() as u32;
+                                        if writer.write_all(&len.to_be_bytes()).await.is_err() ||
+                                           writer.write_all(&msg_bytes).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -271,14 +318,12 @@ impl CommunicationClient for UnixSocketClient {
 
         *self.reader.get_mut() = Some(tokio::io::BufReader::new(reader_half));
         *self.writer.get_mut() = Some(writer_half);
-        self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.connected
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
-    async fn send_message(
-        &self,
-        message: &CommunicationMessage,
-    ) -> Result<(), CommunicationError> {
+    async fn send_message(&self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
         if !self.connected.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),
@@ -287,12 +332,24 @@ impl CommunicationClient for UnixSocketClient {
 
         let mut writer_guard = self.writer.lock().await;
         if let Some(writer) = writer_guard.as_mut() {
-            let mut message_json = serde_json::to_string(message)?;
-            message_json.push('\n');
-            writer.write_all(message_json.as_bytes()).await?;
-            Ok(())
+            match self.config.serialization_format {
+                SerializationFormat::Json => {
+                    let mut message_json = serde_json::to_string(message)?;
+                    message_json.push('\n');
+                    writer.write_all(message_json.as_bytes()).await?;
+                    Ok(())
+                }
+                SerializationFormat::MsgPack => {
+                    let msg_bytes = rmp_serde::to_vec(message)
+                        .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?;
+                    let len = msg_bytes.len() as u32;
+                    writer.write_all(&len.to_be_bytes()).await?;
+                    writer.write_all(&msg_bytes).await?;
+                    Ok(())
+                }
+            }
         } else {
-             Err(CommunicationError::ConnectionFailed(
+            Err(CommunicationError::ConnectionFailed(
                 "Writer not initialized".to_string(),
             ))
         }
@@ -306,23 +363,51 @@ impl CommunicationClient for UnixSocketClient {
         }
 
         use tokio::io::AsyncBufReadExt;
-        let mut reader_guard = self.reader.lock().await; 
-        
+        use tokio::io::AsyncReadExt;
+        let mut reader_guard = self.reader.lock().await;
+
         if let Some(reader) = reader_guard.as_mut() {
-            let mut line = String::new();
-            let bytes_read = reader.read_line(&mut line).await?;
-            if bytes_read == 0 {
-                return Err(CommunicationError::ConnectionFailed(
-                    "Connection closed".to_string(),
-                ));
+            match self.config.serialization_format {
+                SerializationFormat::Json => {
+                    let mut line = String::new();
+                    let bytes_read = reader.read_line(&mut line).await?;
+                    if bytes_read == 0 {
+                        return Err(CommunicationError::ConnectionFailed(
+                            "Connection closed".to_string(),
+                        ));
+                    }
+                    let message: CommunicationMessage =
+                        serde_json::from_str(&line).map_err(|e| {
+                            CommunicationError::DeserializationFailed(format!("{}: {}", e, line))
+                        })?;
+                    Ok(message)
+                }
+                SerializationFormat::MsgPack => {
+                    let mut len_bytes = [0u8; 4];
+                    match reader.read_exact(&mut len_bytes).await {
+                        Ok(_) => {
+                            let len = u32::from_be_bytes(len_bytes) as usize;
+                            let mut buf = vec![0u8; len];
+                            match reader.read_exact(&mut buf).await {
+                                Ok(_) => {
+                                    let message: CommunicationMessage = rmp_serde::from_slice(&buf)
+                                        .map_err(|e| {
+                                            CommunicationError::DeserializationFailed(e.to_string())
+                                        })?;
+                                    Ok(message)
+                                }
+                                Err(e) => Err(CommunicationError::IoError(e.to_string())),
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Err(
+                            CommunicationError::ConnectionFailed("Connection closed".to_string()),
+                        ),
+                        Err(e) => Err(CommunicationError::IoError(e.to_string())),
+                    }
+                }
             }
-
-            let message: CommunicationMessage = serde_json::from_str(&line)
-                .map_err(|e| CommunicationError::DeserializationFailed(format!("{}: {}", e, line)))?;
-
-            Ok(message)
         } else {
-             Err(CommunicationError::ConnectionFailed(
+            Err(CommunicationError::ConnectionFailed(
                 "Reader not initialized".to_string(),
             ))
         }
@@ -331,7 +416,8 @@ impl CommunicationClient for UnixSocketClient {
     async fn disconnect(&mut self) -> Result<(), CommunicationError> {
         *self.reader.get_mut() = None;
         *self.writer.get_mut() = None;
-        self.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.connected
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 

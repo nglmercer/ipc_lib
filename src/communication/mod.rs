@@ -83,11 +83,22 @@ impl From<serde_json::Error> for CommunicationError {
     }
 }
 
+/// Format for message serialization
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializationFormat {
+    /// JSON format (text-based, human readable)
+    Json,
+    /// MessagePack format (binary, compact, faster)
+    MsgPack,
+}
+
 /// Communication configuration
 #[derive(Debug, Clone)]
 pub struct CommunicationConfig {
     /// Protocol to use
     pub protocol: ProtocolType,
+    /// Serialization format to use (default: Json)
+    pub serialization_format: SerializationFormat,
     /// Identifier for this communication channel
     pub identifier: String,
     /// Timeout for operations (in milliseconds)
@@ -102,6 +113,7 @@ impl Default for CommunicationConfig {
     fn default() -> Self {
         Self {
             protocol: ProtocolType::UnixSocket,
+            serialization_format: SerializationFormat::Json,
             identifier: "default".to_string(),
             timeout_ms: 5000,
             enable_fallback: true,
@@ -252,10 +264,7 @@ pub trait CommunicationClient: Send + Sync {
     async fn connect(&mut self) -> Result<(), CommunicationError>;
 
     /// Send a message to the server
-    async fn send_message(
-        &self,
-        message: &CommunicationMessage,
-    ) -> Result<(), CommunicationError>;
+    async fn send_message(&self, message: &CommunicationMessage) -> Result<(), CommunicationError>;
 
     /// Receive a message from the server
     async fn receive_message(&self) -> Result<CommunicationMessage, CommunicationError>;

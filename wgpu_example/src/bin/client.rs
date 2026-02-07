@@ -1,5 +1,5 @@
 use single_instance_app::{
-    communication::CommunicationMessage, communication::ProtocolType, IpcClient,
+    communication::CommunicationMessage, communication::ProtocolType, communication::SerializationFormat, IpcClient,
 };
 use std::time::{Duration, Instant};
 
@@ -8,7 +8,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identifier = "wgpu_render_server";
     println!("🔗 Client starting for: {}...", identifier);
 
-    let client = IpcClient::new(identifier)?.with_protocol(ProtocolType::UnixSocket);
+    let client = IpcClient::new(identifier)?
+        .with_protocol(ProtocolType::UnixSocket)
+        .with_serialization_format(SerializationFormat::MsgPack);
 
     let start_time = Instant::now();
     let width = 512;
