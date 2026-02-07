@@ -64,6 +64,9 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build for ${{ matrix.target }}
         uses: actions-rs/toolchain@v1
         with:
@@ -72,6 +75,8 @@ jobs:
           profile: minimal
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
+
+      - name: Build
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
       - name: Upload artifacts

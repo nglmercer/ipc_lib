@@ -25,9 +25,7 @@ jobs:
         run: cargo fmt --check --all
 
       - name: Run clippy
-        uses: actions-rs/clippy-check@v1
-        with:
-          args: --all-features --all-targets -- -D warnings
+        run: cargo clippy --all-features --all-targets -- -D warnings
 
   rust-doc:
     name: Rust Documentation
