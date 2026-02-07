@@ -171,19 +171,73 @@ impl SingleInstanceApp {
                 println!("🏠 Successfully started as host!");
                 let _ = self.write_pid_to_lock();
                 self.is_primary = true;
-                Ok(true)
+                return Ok(true);
             }
             Err(e) => {
-                println!("⚠️ Failed to start server: {}. Cleaning up...", e);
+                // Check if the error is due to lock file already existing
+                let is_lock_exists = matches!(&e, CommunicationError::ConnectionFailed(msg)
+                    if msg.contains("Server lock file already exists") || msg.contains("AlreadyExists"));
 
-                self.cleanup_stale_resources(initial_protocol).await;
-
-                if self.start_server().await.is_ok() {
-                    println!("🏠 Successfully started as host after cleanup!");
-                    let _ = self.write_pid_to_lock();
-                    self.is_primary = true;
-                    return Ok(true);
+                if is_lock_exists {
+                    // Lock file exists - try to verify if it's a legitimate owner before cleaning
+                    println!("🔍 Lock file exists, checking if another process is the legitimate owner...");
+                    
+                    // Small sleep to give the legitimate process time to write its PID
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    
+                    // Verify if another process is legitimately running
+                    if let Ok(_) = self.connect_to_primary().await {
+                        println!("✅ Connected to existing legitimate instance");
+                        return Ok(false);
+                    }
+                    
+                    // Lock file exists but no server is responding - it might be stale or owned by a dead process
+                    println!("⚠️ Lock file exists but no server responding. Checking PID...");
+                    
+                    // Check PID file to see if the owning process is still alive
+                    use communication::get_temp_path;
+                    let pid_file = get_temp_path(&self.identifier, "pid");
+                    if std::path::Path::new(&pid_file).exists() {
+                        if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+                            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                                if self.is_process_running(pid) {
+                                    // Process is alive but not responding - wait longer
+                                    println!("🕐 PID {} is alive but not responding, waiting...", pid);
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+                                    
+                                    // Try connecting one more time
+                                    if let Ok(_) = self.connect_to_primary().await {
+                                        return Ok(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // No legitimate owner found, clean up and retry
+                    println!("⚠️ No legitimate owner found. Cleaning up stale resources...");
+                    self.cleanup_stale_resources(initial_protocol).await;
+                    
+                    // Give the other process time to finish cleanup before we try
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    
+                    // Final check - see if another process already claimed
+                    if let Ok(_) = self.connect_to_primary().await {
+                        return Ok(false);
+                    }
+                    
+                    // Try to start server again
+                    if self.start_server().await.is_ok() {
+                        println!("🏠 Successfully started as host after cleanup!");
+                        let _ = self.write_pid_to_lock();
+                        self.is_primary = true;
+                        return Ok(true);
+                    }
+                    
+                    println!("⚠️ Could not start server even after cleanup");
                 }
+
+                println!("⚠️ Failed to start server: {}.", e);
 
                 if self.config.enable_fallback {
                     let fallback_protocols = self.config.fallback_protocols.clone();
@@ -293,21 +347,106 @@ impl SingleInstanceApp {
             ProtocolType::UnixSocket => {
                 let socket_path = get_temp_path(&self.identifier, "sock");
                 if std::path::Path::new(&socket_path).exists() {
+                    // Try to verify if a server is actually running on this socket
+                    // If we can't connect, it's stale
+                    ipc_log!("Unix socket exists, checking if server is responsive...");
+                    
+                    // Small delay to allow server to become responsive
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    
+                    // Try to connect one more time before cleaning
+                    let mut config = self.config.clone();
+                    config.timeout_ms = 500;
+                    
+                    if let Ok(protocol_impl) = CommunicationFactory::create_protocol(protocol) {
+                        if let Ok(mut client) = protocol_impl.create_client(&config).await {
+                            if client.connect().await.is_ok() {
+                                ipc_log!("Server is responsive, skipping cleanup");
+                                let _ = client.disconnect().await;
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // Server not responsive, clean up
                     let _ = std::fs::remove_file(&socket_path);
                 }
             }
             ProtocolType::FileBased => {
                 let lock_file = get_temp_path(&self.identifier, "lock");
+                let pid_file = get_temp_path(&self.identifier, "pid");
                 let message_file = get_temp_path(&self.identifier, "msg");
+                
+                // First, check if server is responsive via lock file
+                if std::path::Path::new(&lock_file).exists() {
+                    // Small delay to allow server to become responsive
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    
+                    // Try to connect before cleaning
+                    if let Ok(_) = self.connect_to_primary().await {
+                        ipc_log!("Server is responsive, skipping cleanup");
+                        return;
+                    }
+                    
+                    ipc_log!("Server not responsive, checking PID file...");
+                }
+                
+                // Check if a PID file exists and if the process is still running
+                if std::path::Path::new(&pid_file).exists() {
+                    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                            if self.is_process_running(pid) {
+                                // Process is still alive, don't delete lock file
+                                // But check if it's actually responding
+                                ipc_log!("PID {} is running, waiting for it to become responsive...", pid);
+                                tokio::time::sleep(Duration::from_millis(200)).await;
+                                
+                                // Try connecting one more time
+                                if let Ok(_) = self.connect_to_primary().await {
+                                    ipc_log!("Server became responsive");
+                                    return;
+                                }
+                                
+                                // PID is alive but not responding - might be starting up
+                                // Give it more time
+                                ipc_log!("PID {} is alive but not responding, waiting more...", pid);
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                
+                                if let Ok(_) = self.connect_to_primary().await {
+                                    ipc_log!("Server became responsive after waiting");
+                                    return;
+                                }
+                                
+                                // Process is alive but unresponsive for extended time
+                                // This might be a zombie or stuck process
+                                ipc_log!("Process {} is alive but unresponsive for extended time", pid);
+                                // We'll still proceed with cleanup since it's unresponsive
+                            }
+                        }
+                    }
+                }
+                
+                // Either no PID file, process not alive, or process unresponsive
+                // Clean up stale files
+                ipc_log!("Cleaning up stale resources for {}...", self.identifier);
                 let _ = std::fs::remove_file(&lock_file);
                 let _ = std::fs::remove_file(&message_file);
+                let _ = std::fs::remove_file(&pid_file);
                 // Also clean up any response files
                 let response_file = format!("{}.response", message_file);
                 let _ = std::fs::remove_file(response_file);
             }
             ProtocolType::SharedMemory => {
                 let shm_file = get_temp_path(&self.identifier, "shm");
-                let _ = std::fs::remove_file(&shm_file);
+                if std::path::Path::new(&shm_file).exists() {
+                    // Try to verify if shared memory region is still in use
+                    // If we can't access it, it's likely stale
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    
+                    // For shared memory, we can't easily check responsiveness
+                    // Just clean it up - it will be recreated if needed
+                    let _ = std::fs::remove_file(&shm_file);
+                }
             }
             _ => {} // Other protocols don't have stale files to clean up yet
         }
