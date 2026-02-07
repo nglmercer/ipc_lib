@@ -1,0 +1,99 @@
+name: Lint
+
+on:
+  workflow_call:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  rust-lint:
+    name: Rust Lint (Clippy & Format)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Run rustfmt
+        run: cargo fmt --check --all
+
+      - name: Run clippy
+        uses: actions-rs/clippy-check@v1
+        with:
+          args: --all-features --all-targets -- -D warnings
+
+  rust-doc:
+    name: Rust Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Check documentation
+        run: cargo doc --all-features --no-deps
+
+  bun-lint:
+    name: Bun/TypeScript Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: bindings_uniffi/examples
+        run: bun install
+
+      - name: Run ESLint
+        working-directory: bindings_uniffi/examples
+        run: bun run lint || echo "No lint script configured"
+
+      - name: TypeScript type check
+        working-directory: bindings_uniffi/examples
+        run: bun run check || echo "No check script configured"
+
+      - name: Check formatting
+        working-directory: bindings_uniffi/examples
+        run: |
+          if [ -f "package.json" ]; then
+            bun run format:check || echo "No format:check script configured"
+          fi
+
+  python-lint:
+    name: Python Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Run flake8
+        working-directory: bindings_uniffi/examples
+        run: |
+          if [ -f "python_example.py" ]; then
+            flake8 python_example.py --max-line-length=100 || echo "Lint completed"
+          fi

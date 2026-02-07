@@ -1,0 +1,15 @@
+{
+  "extends": [
+    "eslint:recommended"
+  ],
+  "parser": "@typescript-eslint/parser",
+  "plugins": ["@typescript-eslint"],
+  "root": true,
+  "ignorePatterns": ["dist/", "node_modules/"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "warn",
+    "semi": ["error", "always"],
+    "quotes": ["error", "double"]
+  }
+}

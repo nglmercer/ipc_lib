@@ -1,6 +1,22 @@
 {
+  "name": "bindings-uniffi-examples",
+  "version": "1.0.0",
+  "description": "Examples for Rust IPC library bindings",
+  "scripts": {
+    "lint": "bunx eslint . --ext .ts",
+    "check": "bun tsc --noEmit",
+    "format": "bunx prettier --write .",
+    "format:check": "bunx prettier --check .",
+    "build": "bun build bun_ffi_example.ts --outfile dist/bun_ffi_example.js --target bun",
+    "build:python": "echo 'Python example does not need building'"
+  },
   "dependencies": {
     "@types/bun": "^1.3.8",
     "@types/node": "^25.2.1"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.0.0"
   }
 }

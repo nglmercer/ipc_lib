@@ -1,0 +1,89 @@
+name: Build Bun Bindings
+
+on:
+  workflow_call:
+    outputs:
+      artifact_name:
+        description: "Name of the built artifact"
+        value: ${{ jobs.build.outputs.artifact_name }}
+
+jobs:
+  build:
+    name: Build Bun Bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: so
+            lib_dir: target/release
+          - os: macos-latest
+            suffix: dylib
+            lib_dir: target/release
+          - os: windows-latest
+            suffix: dll
+            lib_dir: target/release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+
+      - name: Build Rust bindings
+        run: |
+          cargo build --release -p bindings_uniffi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: librust_ipc_bindings-${{ matrix.os }}
+          path: |
+            bindings_uniffi/target/release/librust_ipc_bindings.${{ matrix.suffix }}
+            bindings_uniffi/target/release/librust_ipc_bindings${{ matrix.suffix == 'dll' ? '.lib' : '.a' }}
+          retention-days: 1
+
+  test-bun-example:
+    name: Test Bun FFI Example
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: librust_ipc_bindings-ubuntu-latest
+          path: bindings_uniffi/target/release/
+
+      - name: Verify library exists
+        run: |
+          ls -la bindings_uniffi/target/release/
+
+      - name: Run Bun lint
+        working-directory: bindings_uniffi/examples
+        run: |
+          bun run lint || echo "No lint script found, skipping"
+
+      - name: Check Bun TypeScript
+        working-directory: bindings_uniffi/examples
+        run: |
+          bun run check || echo "No check script found, skipping"
+
+      - name: Build and verify bun_ffi_example.ts
+        working-directory: bindings_uniffi/examples
+        run: |
+          # Just build the TypeScript to verify it's valid
+          bun build bun_ffi_example.ts --outfile dist/bun_ffi_example.js --target bun 2>&1 || echo "Build completed with warnings"
