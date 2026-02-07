@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Shared memory communication protocol implementation
 //! Provides IPC communication using memory-mapped files
 //! Works on Unix-like systems and provides fast inter-process communication

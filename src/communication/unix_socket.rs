@@ -1,3 +1,4 @@
+#![allow(unused)]
 //! Unix Domain Socket implementation for IPC communication
 //! Provides efficient local communication on Unix-like systems
 
