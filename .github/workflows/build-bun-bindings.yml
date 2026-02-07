@@ -41,7 +41,7 @@ jobs:
         with:
           name: librust_ipc_bindings-${{ matrix.os }}
           path: |
-            bindings_uniffi/target/release/librust_ipc_bindings.${{ matrix.suffix }}
+            target/release/librust_ipc_bindings.${{ matrix.suffix }}
           retention-days: 1
 
   test-bun-example:
