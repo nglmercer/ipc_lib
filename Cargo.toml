@@ -2,6 +2,22 @@
 name = "single_instance_app"
 version = "0.1.0"
 edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+license = "MIT OR Apache-2.0"
+description = "A robust single-instance application library with multiple IPC protocols"
+repository = "https://github.com/yourusername/rust_ipc"
+keywords = ["ipc", "single-instance", "async", "tokio", "communication"]
+categories = ["asynchronous", "os", "network-programming"]
+readme = "README.md"
+exclude = [
+    "bindings_uniffi/",
+    "ipc_chat_example/",
+    "ipc_wgpu_example/",
+    "target/",
+    ".git/",
+    "*.md",
+    "!README.md",
+]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -15,3 +31,6 @@ rmp-serde = "1.3.1"
 
 [dev-dependencies]
 tempfile = "3.0"
+
+[workspace]
+members = ["bindings_uniffi", "ipc_wgpu_example", "ipc_chat_example"]

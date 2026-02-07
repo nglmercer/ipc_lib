@@ -1,0 +1,28 @@
+# Generated bindings
+../bindings/
+
+# Build artifacts
+target/
+*.so
+*.dylib
+*.dll
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Kotlin/Java
+*.class
+*.jar
+
+# Swift
+*.swiftmodule
+*.swiftdoc
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,15 @@
+[package]
+name = "bindings_uniffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+name = "rust_ipc_bindings"
+
+[dependencies]
+uniffi = { version = "0.28", features = ["tokio"] }
+single_instance_app = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde_json = "1"
+thiserror = "1"
