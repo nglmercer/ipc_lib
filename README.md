@@ -43,8 +43,11 @@ use single_instance_app::{SingleInstanceApp, ProtocolType};
 
 #[tokio::main]
 async fn main() {
+    // The default protocol is platform-specific:
+    // - Unix/Linux/macOS: UnixSocket (fastest)
+    // - Windows: FileBased (cross-platform)
     let mut app = SingleInstanceApp::new("my-unique-app-id")
-        .with_protocol(ProtocolType::UnixSocket)
+        // .with_protocol(ProtocolType::UnixSocket) // Optional: specify protocol explicitly
         .on_message(|msg| {
             println!("Received: {:?}", msg);
             None // Or return Some(response_message)
@@ -102,11 +105,11 @@ See [`bindings_uniffi/README.md`](bindings_uniffi/README.md) for detailed instru
 
 | Protocol         | Platform         | Speed            | Use Case                         |
 | ---------------- | ---------------- | ---------------- | -------------------------------- |
-| **UnixSocket**   | Unix/Linux/macOS | ⚡⚡⚡ Fast      | Default, best for most cases     |
-| **SharedMemory** | All              | ⚡⚡⚡ Fastest   | High-throughput data transfer    |
-| **FileBased**    | All              | ⚡ Slower        | Simple, no socket support needed |
+| **UnixSocket**   | Unix/Linux/macOS | ⚡⚡⚡ Fast      | Default on Unix, best performance |
+| **SharedMemory** | Unix/Linux/macOS | ⚡⚡⚡ Fastest   | High-throughput data transfer    |
+| **FileBased**    | All              | ⚡ Slower        | Cross-platform, reliable fallback |
 | **InMemory**     | All              | ⚡⚡⚡⚡ Instant | Testing only                     |
-| **NamedPipe**    | Windows          | ⚡⚡ Fast        | Windows-specific                 |
+| **NamedPipe**    | Windows          | ⚡⚡ Fast        | Not yet implemented              |
 
 ## 📚 Examples
 

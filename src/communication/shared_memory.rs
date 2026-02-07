@@ -123,7 +123,7 @@ impl SharedMemoryServer {
     }
 
     fn get_shm_file(identifier: &str) -> String {
-        format!("/tmp/{}.shm", identifier)
+        super::get_temp_path(identifier, "shm")
     }
 
     async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
@@ -363,7 +363,7 @@ impl SharedMemoryClient {
     }
 
     fn get_shm_file(identifier: &str) -> String {
-        format!("/tmp/{}.shm", identifier)
+        super::get_temp_path(identifier, "shm")
     }
 
     async fn wait_for_response(&self) -> Result<CommunicationMessage, CommunicationError> {

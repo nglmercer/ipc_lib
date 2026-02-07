@@ -4,7 +4,7 @@
 //! between multiple instances of the application.
 
 use single_instance_app::{
-    communication::CommunicationMessage, communication::ProtocolType, IpcClient, SingleInstanceApp,
+    communication::CommunicationMessage, IpcClient, SingleInstanceApp,
 };
 use std::env;
 use std::process;
@@ -170,7 +170,6 @@ async fn main() {
 
     let username_clone = username.clone();
     let mut app = SingleInstanceApp::new(identifier)
-        .with_protocol(ProtocolType::UnixSocket)
         .on_message(move |msg| {
             if msg.message_type == "chat" && msg.source_id != username_clone {
                 if let Some(content) = msg.payload.as_str() {

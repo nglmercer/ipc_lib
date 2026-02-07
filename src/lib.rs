@@ -287,22 +287,27 @@ impl SingleInstanceApp {
     }
 
     async fn cleanup_stale_resources(&self, protocol: ProtocolType) {
+        use communication::get_temp_path;
+        
         match protocol {
             ProtocolType::UnixSocket => {
-                let socket_path = format!("/tmp/{}.sock", self.identifier);
+                let socket_path = get_temp_path(&self.identifier, "sock");
                 if std::path::Path::new(&socket_path).exists() {
                     let _ = std::fs::remove_file(&socket_path);
                 }
             }
             ProtocolType::FileBased => {
-                let lock_file = format!("/tmp/{}.lock", self.identifier);
-                let message_file = format!("/tmp/{}.msg", self.identifier);
-                let _ = std::fs::remove_file(lock_file);
-                let _ = std::fs::remove_file(message_file);
+                let lock_file = get_temp_path(&self.identifier, "lock");
+                let message_file = get_temp_path(&self.identifier, "msg");
+                let _ = std::fs::remove_file(&lock_file);
+                let _ = std::fs::remove_file(&message_file);
+                // Also clean up any response files
+                let response_file = format!("{}.response", message_file);
+                let _ = std::fs::remove_file(response_file);
             }
             ProtocolType::SharedMemory => {
-                let shm_file = format!("/tmp/{}.shm", self.identifier);
-                let _ = std::fs::remove_file(shm_file);
+                let shm_file = get_temp_path(&self.identifier, "shm");
+                let _ = std::fs::remove_file(&shm_file);
             }
             _ => {} // Other protocols don't have stale files to clean up yet
         }
@@ -334,7 +339,8 @@ impl SingleInstanceApp {
     }
 
     fn write_pid_to_lock(&self) -> Result<(), CommunicationError> {
-        let lock_file = format!("/tmp/{}.pid", self.identifier);
+        use communication::get_temp_path;
+        let lock_file = get_temp_path(&self.identifier, "pid");
         use std::fs::OpenOptions;
         use std::io::Write;
 
@@ -647,7 +653,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(client.config().protocol, ProtocolType::UnixSocket);
         #[cfg(windows)]
-        assert_eq!(client.config().protocol, ProtocolType::NamedPipe);
+        assert_eq!(client.config().protocol, ProtocolType::FileBased);
     }
 
     // ============ IpcServer Tests ============
@@ -749,7 +755,11 @@ mod tests {
     fn test_communication_config_default() {
         let config = CommunicationConfig::default();
 
+        #[cfg(unix)]
         assert_eq!(config.protocol, ProtocolType::UnixSocket);
+        #[cfg(windows)]
+        assert_eq!(config.protocol, ProtocolType::FileBased);
+        
         assert_eq!(config.identifier, "default");
         assert_eq!(config.timeout_ms, 5000);
         assert!(config.enable_fallback);
@@ -778,7 +788,12 @@ mod tests {
     fn test_communication_config_debug() {
         let config = CommunicationConfig::default();
         let debug_format = format!("{:?}", config);
+        
+        #[cfg(unix)]
         assert!(debug_format.contains("UnixSocket"));
+        #[cfg(windows)]
+        assert!(debug_format.contains("FileBased"));
+        
         assert!(debug_format.contains("default"));
     }
 
@@ -900,7 +915,7 @@ mod tests {
 
         for protocol in always_available {
             let result = communication::CommunicationFactory::create_protocol(protocol);
-            assert!(result.is_ok());
+            assert!(result.is_ok(), "Protocol {:?} should be available", protocol);
         }
 
         // Unix-specific protocols only on Unix
@@ -910,19 +925,15 @@ mod tests {
 
             for protocol in unix_protocols {
                 let result = communication::CommunicationFactory::create_protocol(protocol);
-                assert!(result.is_ok());
+                assert!(result.is_ok(), "Protocol {:?} should be available on Unix", protocol);
             }
         }
 
-        // Windows-specific protocols only on Windows
+        // Windows-specific protocols: NamedPipe not yet implemented, so it should return an error
         #[cfg(windows)]
         {
-            let windows_protocols = vec![ProtocolType::NamedPipe];
-
-            for protocol in windows_protocols {
-                let result = communication::CommunicationFactory::create_protocol(protocol);
-                assert!(result.is_ok());
-            }
+            let result = communication::CommunicationFactory::create_protocol(ProtocolType::NamedPipe);
+            assert!(result.is_err(), "NamedPipe should not be implemented yet");
         }
     }
 
@@ -935,10 +946,17 @@ mod tests {
         assert!(protocols.contains(&ProtocolType::InMemory));
 
         #[cfg(unix)]
-        assert!(protocols.contains(&ProtocolType::UnixSocket));
+        {
+            assert!(protocols.contains(&ProtocolType::UnixSocket));
+            assert!(protocols.contains(&ProtocolType::SharedMemory));
+        }
 
         #[cfg(windows)]
-        assert!(protocols.contains(&ProtocolType::NamedPipe));
+        {
+            // On Windows, only FileBased and InMemory are available
+            // NamedPipe is not yet implemented
+            assert!(!protocols.contains(&ProtocolType::NamedPipe));
+        }
     }
 
     // ============ Edge Cases and Integration Tests ============

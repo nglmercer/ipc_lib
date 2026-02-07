@@ -112,17 +112,50 @@ pub struct CommunicationConfig {
 impl Default for CommunicationConfig {
     fn default() -> Self {
         Self {
-            protocol: ProtocolType::UnixSocket,
+            protocol: Self::default_protocol(),
             serialization_format: SerializationFormat::Json,
             identifier: "default".to_string(),
             timeout_ms: 5000,
             enable_fallback: true,
-            fallback_protocols: vec![
-                ProtocolType::UnixSocket,
-                ProtocolType::FileBased,
-                ProtocolType::SharedMemory,
-            ],
+            fallback_protocols: Self::default_fallback_protocols(),
         }
+    }
+}
+
+impl CommunicationConfig {
+    /// Get the default protocol for the current platform
+    pub fn default_protocol() -> ProtocolType {
+        #[cfg(windows)]
+        {
+            ProtocolType::FileBased  // Use FileBased on Windows (cross-platform)
+        }
+        #[cfg(unix)]
+        {
+            ProtocolType::UnixSocket
+        }
+    }
+    
+    /// Get the default fallback protocols for the current platform
+    pub fn default_fallback_protocols() -> Vec<ProtocolType> {
+        let mut protocols = vec![
+            ProtocolType::FileBased,  // Always available - first for reliability
+            ProtocolType::InMemory,   // Always available
+        ];
+        
+        #[cfg(unix)]
+        {
+            protocols.push(ProtocolType::UnixSocket);
+            protocols.push(ProtocolType::SharedMemory);
+        }
+        
+        #[cfg(windows)]
+        {
+            // On Windows, we can add more file-based or other protocols
+            // NamedPipe is not yet implemented, so we stick with FileBased
+            protocols.push(ProtocolType::FileBased);
+        }
+        
+        protocols
     }
 }
 
@@ -212,6 +245,12 @@ pub fn current_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+/// Get a platform-independent temporary file path for the given identifier and extension
+pub fn get_temp_path(identifier: &str, extension: &str) -> String {
+    let temp_dir = std::env::temp_dir();
+    format!("{}/{}.{}", temp_dir.display(), identifier, extension)
+}
+
 /// Trait for communication protocols
 #[async_trait::async_trait]
 pub trait CommunicationProtocol: Send + Sync {
@@ -285,13 +324,47 @@ impl CommunicationFactory {
         protocol_type: ProtocolType,
     ) -> Result<Box<dyn CommunicationProtocol>, CommunicationError> {
         match protocol_type {
-            ProtocolType::UnixSocket => Ok(Box::new(UnixSocketProtocol)),
-            ProtocolType::SharedMemory => Ok(Box::new(SharedMemoryProtocol)),
+            ProtocolType::UnixSocket => {
+                #[cfg(unix)]
+                {
+                    Ok(Box::new(UnixSocketProtocol))
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(CommunicationError::ProtocolNotSupported(
+                        "UnixSocket is only supported on Unix-like systems".to_string(),
+                    ))
+                }
+            }
+            ProtocolType::SharedMemory => {
+                #[cfg(unix)]
+                {
+                    Ok(Box::new(SharedMemoryProtocol))
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(CommunicationError::ProtocolNotSupported(
+                        "SharedMemory is only supported on Unix-like systems".to_string(),
+                    ))
+                }
+            }
             ProtocolType::FileBased => Ok(Box::new(FileBasedProtocol)),
             ProtocolType::InMemory => Ok(Box::new(InMemoryProtocol)),
-            _ => Err(CommunicationError::ProtocolNotSupported(
-                "Protocol not implemented".to_string(),
-            )),
+            ProtocolType::NamedPipe => {
+                #[cfg(windows)]
+                {
+                    // NamedPipe not yet implemented, but could be in future
+                    Err(CommunicationError::ProtocolNotSupported(
+                        "NamedPipe protocol is not yet implemented".to_string(),
+                    ))
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(CommunicationError::ProtocolNotSupported(
+                        "NamedPipe is only supported on Windows".to_string(),
+                    ))
+                }
+            }
         }
     }
 
@@ -300,16 +373,11 @@ impl CommunicationFactory {
         let mut protocols = Vec::new();
 
         // Unix sockets are available on Unix-like systems
-        if cfg!(unix) {
-            protocols.push(ProtocolType::UnixSocket);
-        }
+        #[cfg(unix)]
+        protocols.push(ProtocolType::UnixSocket);
 
-        // Named pipes are available on Windows
-        if cfg!(windows) {
-            protocols.push(ProtocolType::NamedPipe);
-        }
-
-        // Shared memory is available on most platforms
+        // Shared memory is available on Unix-like systems
+        #[cfg(unix)]
         protocols.push(ProtocolType::SharedMemory);
 
         // File-based communication is always available

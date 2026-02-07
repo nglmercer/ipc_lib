@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
+
 /// File-based communication protocol implementation
 #[derive(Debug)]
 pub struct FileBasedProtocol;
@@ -68,11 +69,11 @@ impl FileBasedServer {
     }
 
     fn get_message_file(identifier: &str) -> String {
-        format!("/tmp/{}.msg", identifier)
+        super::get_temp_path(identifier, "msg")
     }
 
     fn get_lock_file(identifier: &str) -> String {
-        format!("/tmp/{}.lock", identifier)
+        super::get_temp_path(identifier, "lock")
     }
 
     async fn wait_for_message(&self) -> Result<Option<CommunicationMessage>, CommunicationError> {
@@ -268,7 +269,7 @@ impl FileBasedClient {
     }
 
     fn get_message_file(identifier: &str) -> String {
-        format!("/tmp/{}.msg", identifier)
+        super::get_temp_path(identifier, "msg")
     }
 }
 
