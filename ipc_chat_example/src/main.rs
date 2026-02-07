@@ -6,7 +6,6 @@
 use single_instance_app::{
     communication::ProtocolType,
     communication::CommunicationMessage,
-    current_timestamp,
     IpcClient,
     SingleInstanceApp,
 };
@@ -49,13 +48,8 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                 input = stdin_rx.recv() => {
                     if let Some(content) = input {
                         if content == "/quit" || content == "/exit" { break; }
-                        let msg = CommunicationMessage {
-                            message_type: "chat".to_string(),
-                            payload: serde_json::json!(content),
-                            timestamp: current_timestamp(),
-                            source_id: username.to_string(),
-                            metadata: serde_json::json!(null),
-                        };
+                        let msg = CommunicationMessage::new("chat", serde_json::json!(content))
+                            .with_source(username);
                         let _ = host.broadcast(msg).await;
                         println!("🏠 You (Host): {}", content);
                         print!("> ");
@@ -77,13 +71,8 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                 input = stdin_rx.recv() => {
                     if let Some(content) = input {
                         if content == "/quit" || content == "/exit" { break; }
-                        let msg = CommunicationMessage {
-                            message_type: "chat".to_string(),
-                            payload: serde_json::json!(content),
-                            timestamp: current_timestamp(),
-                            source_id: client_username.clone(),
-                            metadata: serde_json::json!(null),
-                        };
+                        let msg = CommunicationMessage::new("chat", serde_json::json!(content))
+                            .with_source(&client_username);
                         
                         // Try to send, and reconnect if it fails
                         if let Err(_) = session.send(msg).await {
@@ -91,13 +80,8 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                              if session.reconnect().await.is_ok() {
                                  println!("✅ Reconnected! Resending...");
                                  // Try resending once
-                                 let msg_retry = CommunicationMessage {
-                                     message_type: "chat".to_string(),
-                                     payload: serde_json::json!(content),
-                                     timestamp: current_timestamp(),
-                                     source_id: client_username.clone(),
-                                     metadata: serde_json::json!(null),
-                                 };
+                                 let msg_retry = CommunicationMessage::new("chat", serde_json::json!(content))
+                                     .with_source(&client_username);
                                  let _ = session.send(msg_retry).await;
                              } else {
                                  println!("❌ Reconnect failed. Connection lost.");
@@ -186,6 +170,8 @@ async fn main() {
                     let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
             }
+            // Explicitly return None to indicate no response from this handler
+            None
         });
 
     println!("🔍 Initializing chat session...");

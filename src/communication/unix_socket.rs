@@ -104,16 +104,22 @@ impl UnixSocketServer {
                             if let Ok(message) = message_res {
                                 ipc_log!("Received message type: {}", message.message_type);
 
-                                // Call message handler if set
-                                if let Some(ref handler) = *self.message_handler.lock().await {
-                                    handler(message.clone());
-                                }
+                                // Call message handler if set and get optional response
+                                let response = if let Some(ref handler) = *self.message_handler.lock().await {
+                                    handler(message.clone())
+                                } else {
+                                    None
+                                };
 
-                                // Broadcast to other clients
+                                // Default response if none provided by handler
+                                let response = response.unwrap_or_else(|| {
+                                    message.create_reply(serde_json::json!("Received"))
+                                });
+
+                                // Broadcast to other clients (original message)
                                 let _ = self.broadcast_tx.send(message);
 
-                                // Send response back to client (required for SingleInstanceApp handshake)
-                                let response = CommunicationMessage::response("Received".to_string());
+                                // Send response back to client
                                 let mut resp_json = serde_json::to_string(&response)?;
                                 resp_json.push('\n');
                                 let _ = writer.write_all(resp_json.as_bytes()).await;
@@ -225,10 +231,7 @@ impl CommunicationServer for UnixSocketServer {
         Ok(())
     }
 
-    fn set_message_handler(
-        &self,
-        handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
-    ) -> Result<(), CommunicationError> {
+    fn set_message_handler(&self, handler: MessageHandler) -> Result<(), CommunicationError> {
         let message_handler = self.message_handler.clone();
         tokio::spawn(async move {
             *message_handler.lock().await = Some(handler);

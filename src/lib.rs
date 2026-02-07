@@ -63,7 +63,7 @@ pub struct SingleInstanceApp {
     config: CommunicationConfig,
     server: Option<Box<dyn communication::CommunicationServer>>,
     is_primary: bool,
-    message_handler: Option<Arc<dyn Fn(CommunicationMessage) + Send + Sync>>,
+    message_handler: Option<communication::MessageHandler>,
 }
 
 impl SingleInstanceApp {
@@ -84,7 +84,7 @@ impl SingleInstanceApp {
     /// Set a handler for incoming messages (Primary instance only)
     pub fn on_message<F>(mut self, handler: F) -> Self
     where
-        F: Fn(CommunicationMessage) + Send + Sync + 'static,
+        F: Fn(CommunicationMessage) -> Option<CommunicationMessage> + Send + Sync + 'static,
     {
         self.message_handler = Some(Arc::new(handler));
         self
@@ -344,6 +344,118 @@ impl SingleInstanceApp {
     }
 }
 
+use std::collections::HashMap;
+use tokio::sync::{oneshot, Mutex as TokioMutex};
+
+/// A broker that manages pending requests and their responses
+pub struct RequestBroker {
+    pending: Arc<TokioMutex<HashMap<String, oneshot::Sender<CommunicationMessage>>>>,
+}
+
+impl Default for RequestBroker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RequestBroker {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(TokioMutex::new(HashMap::new())),
+        }
+    }
+
+    /// Register a new request and return a receiver for the response
+    pub async fn register_request(&self, id: String) -> oneshot::Receiver<CommunicationMessage> {
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        rx
+    }
+
+    /// Dispatch a received message if it's a response to a pending request
+    /// Returns true if the message was handled as a response
+    pub async fn dispatch_response(&self, message: CommunicationMessage) -> bool {
+        if let Some(reply_to) = &message.reply_to {
+            let mut pending = self.pending.lock().await;
+            if let Some(tx) = pending.remove(reply_to) {
+                let _ = tx.send(message);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// A wrapper around IPC communication that provides high-level messaging features
+pub struct Messenger {
+    session: Arc<TokioMutex<IpcSession>>,
+    broker: Arc<RequestBroker>,
+}
+
+impl Messenger {
+    pub fn new(session: IpcSession) -> Self {
+        let messenger = Self {
+            session: Arc::new(TokioMutex::new(session)),
+            broker: Arc::new(RequestBroker::new()),
+        };
+
+        // Start background receiver task
+        messenger.start_receiver();
+
+        messenger
+    }
+
+    fn start_receiver(&self) {
+        let session = self.session.clone();
+        let broker = self.broker.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let mut session_guard = session.lock().await;
+                match session_guard.receive().await {
+                    Ok(msg) => {
+                        // Drop lock while dispatching to avoid deadlocks
+                        drop(session_guard);
+                        if !broker.dispatch_response(msg.clone()).await {
+                            // If not a response, it might be an unsolicited message
+                            // In a real implementation we would have a separate
+                            // channel for these.
+                            ipc_log!("Unsolicited message received: {:?}", msg.message_type);
+                        }
+                    }
+                    Err(e) => {
+                        ipc_log!("Messenger receiver task error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Send a request and wait for a response
+    pub async fn request(
+        &self,
+        message: CommunicationMessage,
+    ) -> Result<CommunicationMessage, CommunicationError> {
+        let id = message.id.clone();
+        let rx = self.broker.register_request(id).await;
+
+        self.session.lock().await.send(message).await?;
+
+        match rx.await {
+            Ok(resp) => Ok(resp),
+            Err(_) => Err(CommunicationError::Timeout(
+                "Response channel closed".to_string(),
+            )),
+        }
+    }
+
+    /// Send a message without waiting for response
+    pub async fn send(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+        self.session.lock().await.send(message).await
+    }
+}
+
 /// IPC Client wrapper for simple usage
 pub struct IpcClient {
     config: CommunicationConfig,
@@ -371,35 +483,14 @@ impl IpcClient {
         self
     }
 
-    /// Send arguments to the primary instance
-    pub async fn send_args(&mut self, args: Vec<String>) -> Result<String, CommunicationError> {
-        let message = CommunicationMessage::command_line_args(args);
-        let response = self.send_message(message).await?;
-
-        match response.message_type.as_str() {
-            "response" => Ok(response.payload.as_str().unwrap_or("").to_string()),
-            "error" => Err(CommunicationError::ConnectionFailed(
-                response
-                    .payload
-                    .as_str()
-                    .unwrap_or("Unknown error")
-                    .to_string(),
-            )),
-            _ => Err(CommunicationError::ConnectionFailed(
-                "Unexpected response type".to_string(),
-            )),
-        }
-    }
-
-    /// Send a custom message to the primary instance
+    /// Send a custom message to the primary instance (legacy simple version)
     pub async fn send_message(
         &mut self,
         message: CommunicationMessage,
     ) -> Result<CommunicationMessage, CommunicationError> {
-        let mut session = self.connect_persistent().await?;
-        session.send(message).await?;
-        let response = session.receive().await?;
-        Ok(response)
+        let session = self.connect_persistent().await?;
+        let messenger = Messenger::new(session);
+        messenger.request(message).await
     }
 
     /// Connect to the primary instance and keep the connection alive
@@ -408,6 +499,12 @@ impl IpcClient {
         let mut client = protocol.create_client(&self.config).await?;
         client.connect().await?;
         Ok(IpcSession { client })
+    }
+
+    /// Connect and return a high-level Messenger
+    pub async fn connect_messenger(&self) -> Result<Messenger, CommunicationError> {
+        let session = self.connect_persistent().await?;
+        Ok(Messenger::new(session))
     }
 }
 

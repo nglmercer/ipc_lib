@@ -227,12 +227,17 @@ impl CommunicationServer for SharedMemoryServer {
                     Ok(message) => {
                         ipc_log!("Received message type: {}", message.message_type);
 
-                        // Call message handler if set
-                        if let Some(ref handler) = *message_handler.lock().await {
-                            handler(message.clone());
-                        }
+                        // Call message handler if set and get optional response
+                        let response = if let Some(ref handler) = *message_handler.lock().await {
+                            handler(message.clone())
+                        } else {
+                            None
+                        };
 
-                        let response = CommunicationMessage::response("Received".to_string());
+                        // Default response if none provided by handler
+                        let response = response
+                            .unwrap_or_else(|| message.create_reply(serde_json::json!("Received")));
+
                         let _ = server.send_response(&response).await;
                     }
                     Err(e) => {
@@ -272,10 +277,7 @@ impl CommunicationServer for SharedMemoryServer {
         format!("shm://{}", self.shm_file)
     }
 
-    fn set_message_handler(
-        &self,
-        handler: Arc<dyn Fn(CommunicationMessage) + Send + Sync>,
-    ) -> Result<(), CommunicationError> {
+    fn set_message_handler(&self, handler: MessageHandler) -> Result<(), CommunicationError> {
         let message_handler = self.message_handler.clone();
         tokio::spawn(async move {
             *message_handler.lock().await = Some(handler);
