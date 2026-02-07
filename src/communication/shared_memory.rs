@@ -1,4 +1,5 @@
 #![allow(unused)]
+#![allow(clippy::unnecessary_cast)]
 //! Shared memory communication protocol implementation
 //! Provides IPC communication using memory-mapped files
 //! Works on Unix-like systems and Windows
