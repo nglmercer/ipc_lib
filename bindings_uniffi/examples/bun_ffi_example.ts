@@ -25,6 +25,8 @@ console.log(`📚 Loading library from: ${libPath}`);
 
 // Define the FFI interface matching our C ABI
 const lib = dlopen(libPath, {
+  // ===== App Functions =====
+  
   // Create a new app instance
   ipc_app_new: {
     args: [FFIType.cstring],
@@ -66,6 +68,56 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr],
     returns: FFIType.void,
   },
+
+  // Free a string
+  ipc_app_free_string: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
+
+  // ===== Client Functions =====
+
+  // Create a new client instance
+  ipc_client_new: {
+    args: [FFIType.cstring],
+    returns: FFIType.ptr,
+  },
+
+  // Set protocol for client
+  ipc_client_set_protocol: {
+    args: [FFIType.ptr, FFIType.i32],
+    returns: FFIType.i32,
+  },
+
+  // Send a message from client
+  ipc_client_send: {
+    args: [FFIType.ptr, FFIType.cstring, FFIType.cstring],
+    returns: FFIType.i32,
+  },
+
+  // Receive a message (non-blocking)
+  ipc_client_receive: {
+    args: [FFIType.ptr],
+    returns: FFIType.ptr,
+  },
+
+  // Ping server to check connection
+  ipc_client_ping: {
+    args: [FFIType.ptr],
+    returns: FFIType.i32,
+  },
+
+  // Disconnect and cleanup persistent connection
+  ipc_client_disconnect: {
+    args: [FFIType.ptr],
+    returns: FFIType.i32,
+  },
+
+  // Free client handle
+  ipc_client_free: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
 });
 
 console.log("✅ Library loaded successfully!");
@@ -79,7 +131,17 @@ enum Protocol {
   InMemory = 4,
 }
 
-// Wrapper class for easier usage
+// Message interface matching Rust CommunicationMessage
+interface CommunicationMessage {
+  id: string;
+  message_type: string;
+  payload_json: string;
+  timestamp: number;
+  source_id: string;
+  reply_to?: string;
+}
+
+// Wrapper class for SingleInstanceApp (Primary instance)
 class SingleInstanceApp {
   private handle: Pointer | null;
   
@@ -141,50 +203,229 @@ class SingleInstanceApp {
   }
 }
 
-// Example usage
-async function main() {
-  console.log("\n🚀 Starting Single Instance App Example (Bun FFI)\n");
+// Wrapper class for IPC Client (Secondary instance)
+class IpcClient {
+  private handle: Pointer | null;
   
-  try {
-    const app = new SingleInstanceApp("bun-ipc-example");
+  constructor(identifier: string) {
+    const identifierCStr = Buffer.from(identifier + "\0", "utf-8");
+    this.handle = lib.symbols.ipc_client_new(identifierCStr as unknown as CString);
     
-    // Use Unix sockets (default on Unix-like systems)
+    if (this.handle === null || this.handle === 0) {
+      throw new Error("Failed to create client instance");
+    }
+  }
+  
+  setProtocol(protocol: Protocol): void {
+    const result = lib.symbols.ipc_client_set_protocol(this.handle, protocol);
+    if (result !== 0) {
+      throw new Error("Failed to set client protocol");
+    }
+  }
+  
+  ping(): boolean {
+    const result = lib.symbols.ipc_client_ping(this.handle);
+    return result === 1;
+  }
+  
+  send(messageType: string, payload: object): boolean {
+    const payloadJson = JSON.stringify(payload);
+    const messageTypeCStr = Buffer.from(messageType + "\0", "utf-8");
+    const payloadCStr = Buffer.from(payloadJson + "\0", "utf-8");
+    const result = lib.symbols.ipc_client_send(
+      this.handle,
+      messageTypeCStr as unknown as CString,
+      payloadCStr as unknown as CString
+    );
+    return result === 0;
+  }
+  
+  receive(): CommunicationMessage | null {
+    const resultPtr = lib.symbols.ipc_client_receive(this.handle);
+    
+    if (resultPtr === null || resultPtr === 0) {
+      return null;
+    }
+    
+    try {
+      const resultStr = new CString(resultPtr as unknown as Pointer);
+      const jsonStr = resultStr.toString();
+      lib.symbols.ipc_app_free_string(resultPtr as unknown as Pointer);
+      return JSON.parse(jsonStr) as CommunicationMessage;
+    } catch (e) {
+      return null;
+    }
+  }
+  
+  close(): void {
+    if (this.handle !== null && this.handle !== 0) {
+      lib.symbols.ipc_client_disconnect(this.handle);
+      lib.symbols.ipc_client_free(this.handle);
+      this.handle = null;
+    }
+  }
+}
+
+// Helper function to get username
+function getUsername(): string {
+  const args = process.argv.slice(2);
+  const usernameArg = args.find(arg => !arg.startsWith("--") && arg !== "chat");
+  return usernameArg || `User${process.pid % 1000}`;
+}
+
+
+
+// Example usage - Chat Demo
+async function runChatDemo() {
+  console.log("\n💬 IPC Chat Application (Bun FFI)\n");
+  console.log("═══════════════════════════════════════════\n");
+  
+  const identifier = "bun-chat-example";
+  const username = getUsername();
+  try {
+    const app = new SingleInstanceApp(identifier);
     app.setProtocol(Protocol.UnixSocket);
     
     const instanceType = app.enforceSingleInstance();
     
     if (instanceType === "primary") {
-      console.log("🏠 I am the PRIMARY instance!");
-      console.log("   Waiting for messages from other instances...");
-      console.log("   Try running this script again in another terminal!");
-      console.log("   Press Ctrl+C to exit\n");
+      // ===== PRIMARY INSTANCE (HOST) =====
+      console.log(`🏠 You are the HOST! (User: ${username})`);
+      console.log("═══════════════════════════════════════════");
+      console.log("Chat Commands:");
+      console.log("  <message>   - Broadcast message to all clients");
+      console.log("  /quit       - Exit chat");
+      console.log("═══════════════════════════════════════════\n");
       
-      // Keep the primary instance running
+      // Keep the host running and periodically check for messages
       let counter = 0;
-      const interval = setInterval(() => {
+      const heartbeatInterval = setInterval(() => {
         counter++;
-        if (counter % 5 === 0) {
-          console.log(`💓 Heartbeat ${counter}s - Still running as primary...`);
-        }
-      }, 1000);
+      }, 5000);
+      
+      // Handle input
+      const readline = await import("node:readline");
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+      
+      const askInput = () => {
+        rl.question("> ", async (input) => {
+          if (input.trim() === "/quit" || input.trim() === "/exit") {
+            console.log("👋 Exiting chat...");
+            clearInterval(heartbeatInterval);
+            rl.close();
+            app.close();
+            lib.close();
+            process.exit(0);
+          }
+          
+          if (input.trim()) {
+            app.broadcast("chat", { content: input.trim(), from: username, isHost: true });
+            console.log(`📤 You: ${input.trim()}`);
+          }
+          
+          askInput();
+        });
+      };
+      
+      askInput();
       
       // Handle cleanup on exit
       process.on("SIGINT", () => {
-        console.log("\n\n👋 Shutting down primary instance...");
-        clearInterval(interval);
+        console.log("\n👋 Shutting down...");
+        clearInterval(heartbeatInterval);
+        rl.close();
         app.close();
         lib.close();
         process.exit(0);
       });
       
     } else {
-      console.log("👥 I am a SECONDARY instance!");
-      console.log("   Connected to existing primary instance");
-      console.log("   The primary instance received our connection message\n");
+      // ===== SECONDARY INSTANCE (CLIENT) =====
+      console.log(`💬 You are a CLIENT! (User: ${username})`);
+      console.log("═══════════════════════════════════════════");
+      console.log("Chat Commands:");
+      console.log("  <message>   - Send message to host");
+      console.log("  /quit       - Exit chat");
+      console.log("═══════════════════════════════════════════\n");
       
-      // Cleanup and exit
-      app.close();
-      lib.close();
+      const client = new IpcClient(identifier);
+      client.setProtocol(Protocol.UnixSocket);
+      
+      // Check if server is available
+      if (!client.ping()) {
+        console.log("❌ Cannot connect to chat server");
+        client.close();
+        app.close();
+        lib.close();
+        return;
+      }
+      
+      console.log("✅ Connected to chat server!\n");
+      
+      // Create readline interface
+      const readline = await import("node:readline");
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+      
+      let isFirstMessage = true;
+      
+      const askInput = () => {
+        rl.question("> ", async (input) => {
+          if (input.trim() === "/quit" || input.trim() === "/exit") {
+            console.log("👋 Exiting chat...");
+            rl.close();
+            client.close();
+            app.close();
+            lib.close();
+            process.exit(0);
+          }
+          
+          if (input.trim()) {
+            if (client.send("chat", { content: input.trim(), from: username })) {
+              console.log(`📤 Sent: ${input.trim()}`);
+            } else {
+              console.log("❌ Failed to send message");
+            }
+          }
+          
+          askInput();
+        });
+      };
+      
+      askInput();
+      
+      // Periodically check for incoming messages
+      const messageCheckInterval = setInterval(() => {
+        try {
+          const msg = client.receive();
+          if (!msg) return;
+          if (msg.message_type !== "chat") return;
+          if (!msg.payload_json) return;
+          const payload = JSON.parse(msg.payload_json);
+          if (payload.from !== username) {
+            console.log(`\r[CHAT] ${payload.from}: ${payload.content}`);
+            process.stdout.write("> ");
+          }
+        } catch (e) {
+          // Ignore parse errors from non-chat messages
+        }
+      }, 100);
+      
+      // Handle cleanup on exit
+      process.on("SIGINT", () => {
+        console.log("\n👋 Shutting down...");
+        clearInterval(messageCheckInterval);
+        rl.close();
+        client.close();
+        app.close();
+        lib.close();
+        process.exit(0);
+      });
     }
     
   } catch (error) {
@@ -194,5 +435,4 @@ async function main() {
   }
 }
 
-// Run the example
-main();
+runChatDemo();
