@@ -6,11 +6,14 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tokio::time::{timeout, Duration};
 
 // Opaque handle for SingleInstanceApp
 pub struct AppHandle {
     app: single_instance_app::SingleInstanceApp,
     runtime: Arc<Runtime>,
+    // Message queue for receiving messages from clients
+    messages: Arc<std::sync::Mutex<Vec<single_instance_app::communication::CommunicationMessage>>>,
 }
 
 // Opaque handle for IPC Client
@@ -41,11 +44,21 @@ pub extern "C" fn ipc_app_new(identifier: *const c_char) -> *mut AppHandle {
         Err(_) => return ptr::null_mut(),
     };
 
-    let app = single_instance_app::SingleInstanceApp::new(identifier);
+    let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let messages_clone = messages.clone();
+    
+    let app = single_instance_app::SingleInstanceApp::new(identifier)
+        .on_message(move |msg| {
+            // Store received messages in the queue
+            messages_clone.lock().unwrap().push(msg.clone());
+            // Return a response to acknowledge receipt
+            Some(msg.create_reply(serde_json::json!("received")))
+        });
 
     Box::into_raw(Box::new(AppHandle {
         app,
         runtime,
+        messages,
     }))
 }
 
@@ -131,6 +144,34 @@ pub extern "C" fn ipc_app_broadcast(
     match handle.runtime.block_on(handle.app.broadcast(msg)) {
         Ok(_) => 0,
         Err(_) => -1,
+    }
+}
+
+/// Receive a message from clients (non-blocking, returns null if no message available)
+/// Returns pointer to JSON string of the message, or null if no message/error
+/// Caller must call ipc_app_free_string to free the returned string
+#[no_mangle]
+pub extern "C" fn ipc_app_receive(handle: *mut AppHandle) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+
+    let handle = unsafe { &mut *handle };
+
+    // Try to pop a message from the queue
+    let message = handle.messages.lock().unwrap().pop();
+
+    match message {
+        Some(msg) => {
+            match serde_json::to_string(&msg) {
+                Ok(json) => {
+                    let c_string = CString::new(json).unwrap();
+                    c_string.into_raw()
+                }
+                Err(_) => ptr::null_mut() as *mut c_char,
+            }
+        }
+        None => ptr::null_mut() as *mut c_char,
     }
 }
 
@@ -294,9 +335,11 @@ pub extern "C" fn ipc_client_receive(handle: *mut ClientHandle) -> *mut c_char {
 
         let client = handle.client.as_mut().unwrap();
 
-        // Try to receive a message (non-blocking style)
-        match client.receive_message().await {
-            Ok(msg) => {
+        // Try to receive a message with a short timeout (non-blocking)
+        let receive_result = timeout(Duration::from_millis(50), client.receive_message()).await;
+
+        match receive_result {
+            Ok(Ok(msg)) => {
                 // Return JSON string of message
                 match serde_json::to_string(&msg) {
                     Ok(json) => {
@@ -306,9 +349,8 @@ pub extern "C" fn ipc_client_receive(handle: *mut ClientHandle) -> *mut c_char {
                     Err(_) => ptr::null_mut() as *mut c_char,
                 }
             }
-            Err(_) => {
-                // Connection might be stale, try to reconnect
-                handle.client = None;
+            Ok(Err(_)) | Err(_) => {
+                // No message available or timeout - don't disconnect, just return null
                 ptr::null_mut() as *mut c_char
             }
         }

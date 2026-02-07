@@ -51,6 +51,12 @@ const lib = dlopen(libPath, {
     returns: FFIType.i32,
   },
   
+  // Receive a message from clients (non-blocking)
+  ipc_app_receive: {
+    args: [FFIType.ptr],
+    returns: FFIType.ptr,
+  },
+  
   // Get last error message
   ipc_app_get_last_error: {
     args: [],
@@ -135,7 +141,7 @@ enum Protocol {
 interface CommunicationMessage {
   id: string;
   message_type: string;
-  payload_json: string;
+  payload: any;  // Direct JSON object, not a string
   timestamp: number;
   source_id: string;
   reply_to?: string;
@@ -195,6 +201,23 @@ class SingleInstanceApp {
     }
   }
   
+  receive(): CommunicationMessage | null {
+    const resultPtr = lib.symbols.ipc_app_receive(this.handle);
+    
+    if (resultPtr === null || resultPtr === 0) {
+      return null;
+    }
+    
+    try {
+      const resultStr = new CString(resultPtr as unknown as Pointer);
+      const jsonStr = resultStr.toString();
+      lib.symbols.ipc_app_free_string(resultPtr as unknown as Pointer);
+      return JSON.parse(jsonStr) as CommunicationMessage;
+    } catch (e) {
+      return null;
+    }
+  }
+  
   close(): void {
     if (this.handle !== null && this.handle !== 0) {
       lib.symbols.ipc_app_free(this.handle);
@@ -221,6 +244,14 @@ class IpcClient {
     if (result !== 0) {
       throw new Error("Failed to set client protocol");
     }
+  }
+  
+  // Establish persistent connection (must be called before receive)
+  connect(): boolean {
+    // Call receive once to establish persistent connection
+    const msg = this.receive();
+    // Ignore the result, just establish the connection
+    return msg !== null || true; // Connection established if no error
   }
   
   ping(): boolean {
@@ -297,11 +328,22 @@ async function runChatDemo() {
       console.log("  /quit       - Exit chat");
       console.log("═══════════════════════════════════════════\n");
       
-      // Keep the host running and periodically check for messages
-      let counter = 0;
-      const heartbeatInterval = setInterval(() => {
-        counter++;
-      }, 5000);
+      // Keep the host running and periodically check for messages from clients
+      const messageCheckInterval = setInterval(() => {
+        try {
+          const msg = app.receive();
+          if (!msg) return;
+          if (msg.message_type !== "chat") return;
+          if (!msg.payload) return;
+          const payload = msg.payload as { content: string; from: string; isHost?: boolean };
+          if (payload.from !== username) {
+            console.log(`\r[CHAT] ${payload.from}: ${payload.content}`);
+            process.stdout.write("> ");
+          }
+        } catch (e) {
+          // Ignore parse errors from non-chat messages
+        }
+      }, 100);
       
       // Handle input
       const readline = await import("node:readline");
@@ -314,7 +356,7 @@ async function runChatDemo() {
         rl.question("> ", async (input) => {
           if (input.trim() === "/quit" || input.trim() === "/exit") {
             console.log("👋 Exiting chat...");
-            clearInterval(heartbeatInterval);
+            clearInterval(messageCheckInterval);
             rl.close();
             app.close();
             lib.close();
@@ -335,7 +377,7 @@ async function runChatDemo() {
       // Handle cleanup on exit
       process.on("SIGINT", () => {
         console.log("\n👋 Shutting down...");
-        clearInterval(heartbeatInterval);
+        clearInterval(messageCheckInterval);
         rl.close();
         app.close();
         lib.close();
@@ -364,6 +406,9 @@ async function runChatDemo() {
       }
       
       console.log("✅ Connected to chat server!\n");
+      
+      // Establish persistent connection for receiving broadcasts
+      client.connect();
       
       // Create readline interface
       const readline = await import("node:readline");
@@ -405,8 +450,8 @@ async function runChatDemo() {
           const msg = client.receive();
           if (!msg) return;
           if (msg.message_type !== "chat") return;
-          if (!msg.payload_json) return;
-          const payload = JSON.parse(msg.payload_json);
+          if (!msg.payload) return;
+          const payload = msg.payload as { content: string; from: string; isHost?: boolean };
           if (payload.from !== username) {
             console.log(`\r[CHAT] ${payload.from}: ${payload.content}`);
             process.stdout.write("> ");
