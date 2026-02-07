@@ -801,10 +801,8 @@ mod tests {
     #[test]
     fn test_ipc_client_default_protocol() {
         let client = IpcClient::new("test_client").unwrap();
-        #[cfg(unix)]
-        assert_eq!(client.config().protocol, ProtocolType::UnixSocket);
-        #[cfg(windows)]
-        assert_eq!(client.config().protocol, ProtocolType::FileBased);
+        // SharedMemory is the default on both platforms now
+        assert_eq!(client.config().protocol, ProtocolType::SharedMemory);
     }
 
     // ============ IpcServer Tests ============
@@ -906,10 +904,8 @@ mod tests {
     fn test_communication_config_default() {
         let config = CommunicationConfig::default();
 
-        #[cfg(unix)]
-        assert_eq!(config.protocol, ProtocolType::UnixSocket);
-        #[cfg(windows)]
-        assert_eq!(config.protocol, ProtocolType::FileBased);
+        // On Windows and Unix, SharedMemory is now the default
+        assert_eq!(config.protocol, ProtocolType::SharedMemory);
 
         assert_eq!(config.identifier, "default");
         assert_eq!(config.timeout_ms, 5000);

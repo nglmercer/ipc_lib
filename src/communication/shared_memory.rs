@@ -34,6 +34,18 @@ const FILE_MAP_ALL_ACCESS: u32 = 0xf001f;
 #[cfg(windows)]
 const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
 
+// Shared memory protocol constants
+const SHM_SIZE: usize = 4096;
+const DATA_FLAG_OFFSET: usize = 0;
+const LENGTH_OFFSET: usize = 1;
+const DATA_OFFSET: usize = 5;
+
+// Flag values:
+// 0 = empty/idle
+// 1 = client message (request)
+// 2 = server response to a request
+// 3 = broadcast message from server
+
 /// Shared memory communication protocol implementation
 #[derive(Debug)]
 pub struct SharedMemoryProtocol;
@@ -66,10 +78,13 @@ pub struct SharedMemoryServer {
     shm_name: String,
     is_running: Arc<Mutex<bool>>,
     message_handler: SharedMessageHandler,
+    broadcast_tx: tokio::sync::broadcast::Sender<CommunicationMessage>,
     #[cfg(unix)]
     shm_file: String,
     #[cfg(windows)]
-    mapping_handle: usize,
+    mapping_handle: isize,
+    #[cfg(unix)]
+    lock_file: String,
 }
 
 impl std::fmt::Debug for SharedMemoryServer {
@@ -84,14 +99,19 @@ impl std::fmt::Debug for SharedMemoryServer {
 impl SharedMemoryServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
         let shm_name = Self::get_shm_name(&config.identifier);
+        #[cfg(unix)]
+        let shm_file = Self::get_shm_file(&config.identifier);
+        #[cfg(unix)]
+        let lock_file = Self::get_lock_file(&config.identifier);
 
         #[cfg(unix)]
         {
-            let shm_file = Self::get_shm_file(&config.identifier);
-
             // Clean up any existing shared memory file
             if Path::new(&shm_file).exists() {
                 std::fs::remove_file(&shm_file)?;
+            }
+            if Path::new(&lock_file).exists() {
+                std::fs::remove_file(&lock_file)?;
             }
 
             // Create the shared memory file
@@ -107,14 +127,24 @@ impl SharedMemoryServer {
                 .open(&shm_file)?;
 
             // Set file size to accommodate our message buffer
-            file.set_len(4096)?;
+            file.set_len(SHM_SIZE as u64)?;
+
+            // Initialize the lock file
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&lock_file)?;
 
             Ok(Self {
                 config: config.clone(),
                 shm_file,
                 shm_name,
+                lock_file,
                 is_running: Arc::new(Mutex::new(false)),
                 message_handler: Arc::new(Mutex::new(None)),
+                mapping_handle: 0,
+                broadcast_tx: tokio::sync::broadcast::channel(100).0,
             })
         }
 
@@ -127,7 +157,7 @@ impl SharedMemoryServer {
                     std::ptr::null_mut(),
                     PAGE_READWRITE,
                     0,
-                    4096,
+                    SHM_SIZE as u32,
                     shm_name.as_ptr() as *const i8,
                 )
             };
@@ -143,7 +173,8 @@ impl SharedMemoryServer {
                 shm_name,
                 is_running: Arc::new(Mutex::new(false)),
                 message_handler: Arc::new(Mutex::new(None)),
-                mapping_handle: mapping as usize,
+                mapping_handle: mapping as isize,
+                broadcast_tx: tokio::sync::broadcast::channel(100).0,
             })
         }
     }
@@ -153,9 +184,14 @@ impl SharedMemoryServer {
         super::get_temp_path(identifier, "shm")
     }
 
+    #[cfg(unix)]
+    fn get_lock_file(identifier: &str) -> String {
+        super::get_temp_path(identifier, "lock")
+    }
+
     #[cfg(windows)]
     fn get_shm_name(identifier: &str) -> String {
-        format!("Local\\IPC_LIB_{}", identifier)
+        format!("Local\\IPC_LIB_SHM_{}", identifier)
     }
 
     #[cfg(unix)]
@@ -163,12 +199,35 @@ impl SharedMemoryServer {
         super::get_temp_path(identifier, "shm")
     }
 
+    #[cfg(unix)]
+    fn acquire_lock(&self) -> Result<std::fs::File, CommunicationError> {
+        use std::fs::OpenOptions;
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&self.lock_file)?;
+        use std::os::unix::fs::FileExt;
+        file.lock_exclusive()?;
+        Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn release_lock(&self, _file: std::fs::File) {}
+
+    #[cfg(windows)]
+    fn acquire_lock(&self) -> Result<(), CommunicationError> {
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn release_lock(&self, _file: ()) {}
+
     async fn wait_for_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
+        let format = self.config.serialization_format;
 
         loop {
-            // Check if server is still running
             if !*self.is_running.lock().await {
                 return Err(CommunicationError::ConnectionFailed(
                     "Server stopped".to_string(),
@@ -177,9 +236,8 @@ impl SharedMemoryServer {
 
             #[cfg(unix)]
             {
-                // Check if shared memory file exists
                 if !Path::new(&self.shm_file).exists() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     if start_time.elapsed() >= timeout_duration {
                         return Err(CommunicationError::Timeout(
                             "No message received".to_string(),
@@ -188,33 +246,43 @@ impl SharedMemoryServer {
                     continue;
                 }
 
-                // Map the shared memory (blocking operation)
-                let shm_file = self.shm_file.clone();
-                let format = self.config.serialization_format;
+                let _lock = match self.acquire_lock() {
+                    Ok(lock) => lock,
+                    Err(_) => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
 
                 let result = tokio::task::spawn_blocking(move || {
                     use memmap2::MmapOptions;
                     use std::fs::OpenOptions;
+                    use std::os::unix::fs::FileExt;
 
                     let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                     let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-
-                    // Check if there's data in shared memory
                     let data = mmap.as_ref();
-                    if data[0] != 0 {
-                        // First byte indicates if there's data
-                        // Read the message length (first 4 bytes)
-                        let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                    let data_flag = data[DATA_FLAG_OFFSET];
 
-                        if len > 0 && len < 4096 {
-                            // Read the message data (Clone to vector to avoid borrow checker issues)
-                            let message_bytes = data[5..5 + len].to_vec();
+                    drop(mmap);
+                    drop(file);
 
-                            // Clear the shared memory flag immediately
-                            mmap.as_mut()[0] = 0; // Clear data flag
+                    if data_flag == 1 {
+                        let len = u32::from_ne_bytes([
+                            data[LENGTH_OFFSET],
+                            data[LENGTH_OFFSET + 1],
+                            data[LENGTH_OFFSET + 2],
+                            data[LENGTH_OFFSET + 3],
+                        ]) as usize;
+
+                        if len > 0 && len < SHM_SIZE - DATA_OFFSET {
+                            let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+                            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+                            let data = mmap.as_ref();
+                            let message_bytes = data[DATA_OFFSET..DATA_OFFSET + len].to_vec();
+                            mmap.as_mut()[DATA_FLAG_OFFSET] = 0;
                             mmap.flush()?;
 
-                            // Parse the message based on format (using the owned vector)
                             let message_res = match format {
                                 SerializationFormat::Json => {
                                     let message_str = String::from_utf8_lossy(&message_bytes);
@@ -233,15 +301,13 @@ impl SharedMemoryServer {
                             return Ok(Some(message_res?));
                         }
                     }
-                    Ok(None)
+                    Ok::<Option<CommunicationMessage>, CommunicationError>(None)
                 })
                 .await;
 
                 match result {
                     Ok(Ok(Some(message))) => return Ok(message),
-                    Ok(Ok(None)) => {
-                        // No message yet, continue waiting
-                    }
+                    Ok(Ok(None)) => {}
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
                         return Err(CommunicationError::IoError(
@@ -253,13 +319,12 @@ impl SharedMemoryServer {
 
             #[cfg(windows)]
             {
-                // Check if mapping exists (other process has created it)
                 let mapping = unsafe {
                     OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
                 };
 
                 if mapping.is_null() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     if start_time.elapsed() >= timeout_duration {
                         return Err(CommunicationError::Timeout(
                             "No message received".to_string(),
@@ -268,35 +333,41 @@ impl SharedMemoryServer {
                     continue;
                 }
 
-                // Map the view
-                let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 4096) };
+                let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
 
                 if view.is_null() {
                     unsafe {
-                        CloseHandle(mapping);
+                        CloseHandle(mapping as *mut c_void);
                     }
-                    return Err(CommunicationError::IoError(
-                        "Failed to map view".to_string(),
-                    ));
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
                 }
 
-                let format = self.config.serialization_format;
+                let data: &[u8; SHM_SIZE] = unsafe { &*(view as *const [u8; SHM_SIZE]) };
+                let data_flag = data[DATA_FLAG_OFFSET];
 
-                // Read data from shared memory
-                let data: &[u8; 4096] = unsafe { &*(view as *const [u8; 4096]) };
+                if data_flag == 1 {
+                    let len = u32::from_ne_bytes([
+                        data[LENGTH_OFFSET],
+                        data[LENGTH_OFFSET + 1],
+                        data[LENGTH_OFFSET + 2],
+                        data[LENGTH_OFFSET + 3],
+                    ]) as usize;
 
-                if data[0] != 0 {
-                    let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                    if len > 0 && len < SHM_SIZE - DATA_OFFSET {
+                        let message_bytes = data[DATA_OFFSET..DATA_OFFSET + len].to_vec();
 
-                    if len > 0 && len < 4096 {
-                        let message_bytes = data[5..5 + len].to_vec();
-
-                        // Clear the shared memory flag
                         unsafe {
                             *(view as *mut u8) = 0;
                         }
 
-                        // Parse the message
+                        unsafe {
+                            UnmapViewOfFile(view);
+                        }
+                        unsafe {
+                            CloseHandle(mapping as *mut c_void);
+                        }
+
                         let message_res = match format {
                             SerializationFormat::Json => {
                                 let message_str = String::from_utf8_lossy(&message_bytes);
@@ -312,13 +383,6 @@ impl SharedMemoryServer {
                             }
                         };
 
-                        unsafe {
-                            UnmapViewOfFile(view);
-                        }
-                        unsafe {
-                            CloseHandle(mapping);
-                        }
-
                         match message_res {
                             Ok(msg) => return Ok(msg),
                             Err(e) => return Err(e),
@@ -330,14 +394,12 @@ impl SharedMemoryServer {
                     UnmapViewOfFile(view);
                 }
                 unsafe {
-                    CloseHandle(mapping);
+                    CloseHandle(mapping as *mut c_void);
                 }
             }
 
-            // Wait a bit before checking again
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
 
-            // Check timeout
             if start_time.elapsed() >= timeout_duration {
                 return Err(CommunicationError::Timeout(
                     "No message received".to_string(),
@@ -361,39 +423,35 @@ impl SharedMemoryServer {
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
         };
 
+        if response_bytes.len() >= SHM_SIZE - DATA_OFFSET {
+            return Err(CommunicationError::SerializationFailed(
+                "Response too large".to_string(),
+            ));
+        }
+
         #[cfg(unix)]
         {
-            let shm_file = self.shm_file.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use memmap2::MmapOptions;
-                use std::fs::OpenOptions;
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::FileExt;
 
-                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
-                let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.shm_file)?;
+            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-                // Write the response to shared memory
-                // Format: [data_flag(1)][length(4)][data(n)]
-                mmap.as_mut()[0] = 1; // Set data flag
-                mmap.as_mut()[1..5].copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
-                mmap.as_mut()[5..5 + response_bytes.len()].copy_from_slice(&response_bytes);
+            mmap.as_mut()[DATA_FLAG_OFFSET] = 2; // Flag 2 = server response
+            mmap.as_mut()[LENGTH_OFFSET..LENGTH_OFFSET + 4]
+                .copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
+            mmap.as_mut()[DATA_OFFSET..DATA_OFFSET + response_bytes.len()]
+                .copy_from_slice(&response_bytes);
 
-                mmap.flush()?;
-
-                Ok::<(), CommunicationError>(())
-            })
-            .await;
-
-            match result {
-                Ok(inner) => inner,
-                Err(_) => Err(CommunicationError::IoError(
-                    "Spawn blocking failed".to_string(),
-                )),
-            }
+            mmap.flush()?;
+            Ok(())
         }
 
         #[cfg(windows)]
         {
-            // Reopen the file mapping
             let mapping = unsafe {
                 OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
             };
@@ -404,30 +462,112 @@ impl SharedMemoryServer {
                 ));
             }
 
-            // Map the view
-            let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 4096) };
+            let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
 
             if view.is_null() {
                 unsafe {
-                    CloseHandle(mapping);
+                    CloseHandle(mapping as *mut c_void);
                 }
                 return Err(CommunicationError::IoError(
                     "Failed to map view".to_string(),
                 ));
             }
 
-            // Write the response
             let view_slice: &mut [u8] =
-                unsafe { std::slice::from_raw_parts_mut(view as *mut u8, 4096) };
-            view_slice[0] = 1; // Set data flag
-            view_slice[1..5].copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
-            view_slice[5..5 + response_bytes.len()].copy_from_slice(&response_bytes);
+                unsafe { std::slice::from_raw_parts_mut(view as *mut u8, SHM_SIZE) };
+            view_slice[DATA_FLAG_OFFSET] = 2; // Flag 2 = server response
+            view_slice[LENGTH_OFFSET..LENGTH_OFFSET + 4]
+                .copy_from_slice(&(response_bytes.len() as u32).to_ne_bytes());
+            view_slice[DATA_OFFSET..DATA_OFFSET + response_bytes.len()]
+                .copy_from_slice(&response_bytes);
 
             unsafe {
                 UnmapViewOfFile(view);
             }
             unsafe {
-                CloseHandle(mapping);
+                CloseHandle(mapping as *mut c_void);
+            }
+            Ok(())
+        }
+    }
+
+    async fn send_broadcast(&self, message: &CommunicationMessage) -> Result<(), CommunicationError> {
+        let format = self.config.serialization_format;
+
+        let message_bytes = match format {
+            SerializationFormat::Json => {
+                let s = serde_json::to_string(message)?;
+                s.into_bytes()
+            }
+            SerializationFormat::MsgPack => rmp_serde::to_vec(message)
+                .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
+        };
+
+        if message_bytes.len() >= SHM_SIZE - DATA_OFFSET {
+            return Err(CommunicationError::SerializationFailed(
+                "Broadcast message too large".to_string(),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::FileExt;
+
+            let broadcast_file = format!("{}.broadcast", self.shm_file);
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .append(true)
+                .open(&broadcast_file)?;
+
+            // Write length prefix and message
+            let len_bytes = (message_bytes.len() as u32).to_ne_bytes();
+            file.write_all_at(&len_bytes, 0)?;
+            file.write_all_at(&message_bytes, 4)?;
+            file.sync_all()?;
+            Ok(())
+        }
+
+        #[cfg(windows)]
+        {
+            // On Windows, use a separate broadcast event and shared memory
+            // For simplicity, we'll use the same shared memory with flag 3
+            let mapping = unsafe {
+                OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
+            };
+
+            if mapping.is_null() {
+                return Err(CommunicationError::IoError(
+                    "Failed to open file mapping".to_string(),
+                ));
+            }
+
+            let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
+
+            if view.is_null() {
+                unsafe {
+                    CloseHandle(mapping as *mut c_void);
+                }
+                return Err(CommunicationError::IoError(
+                    "Failed to map view".to_string(),
+                ));
+            }
+
+            let view_slice: &mut [u8] =
+                unsafe { std::slice::from_raw_parts_mut(view as *mut u8, SHM_SIZE) };
+            view_slice[DATA_FLAG_OFFSET] = 3; // Flag 3 = broadcast
+            view_slice[LENGTH_OFFSET..LENGTH_OFFSET + 4]
+                .copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
+            view_slice[DATA_OFFSET..DATA_OFFSET + message_bytes.len()]
+                .copy_from_slice(&message_bytes);
+
+            unsafe {
+                UnmapViewOfFile(view);
+            }
+            unsafe {
+                CloseHandle(mapping as *mut c_void);
             }
             Ok(())
         }
@@ -439,7 +579,6 @@ impl CommunicationServer for SharedMemoryServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
         *self.is_running.lock().await = true;
 
-        // Spawn a task to handle incoming messages
         let is_running = self.is_running.clone();
         let config = self.config.clone();
         let shm_name = self.shm_name.clone();
@@ -448,6 +587,7 @@ impl CommunicationServer for SharedMemoryServer {
         let message_handler = self.message_handler.clone();
         #[cfg(windows)]
         let mapping_handle = self.mapping_handle;
+        let broadcast_tx = self.broadcast_tx.clone();
 
         tokio::spawn(async move {
             while *is_running.lock().await {
@@ -460,10 +600,12 @@ impl CommunicationServer for SharedMemoryServer {
                         shm_name: shm_name.clone(),
                         is_running: is_running.clone(),
                         message_handler: message_handler.clone(),
+                        mapping_handle: 0,
+                        broadcast_tx: broadcast_tx.clone(),
                     };
                     match server.wait_for_message().await {
                         Ok(message) => {
-                            ipc_log!("Received message type: {}", message.message_type);
+                            ipc_log!("Server received message type: {}", message.message_type);
 
                             let response = if let Some(ref handler) = *message_handler.lock().await
                             {
@@ -476,11 +618,15 @@ impl CommunicationServer for SharedMemoryServer {
                                 message.create_reply(serde_json::json!("Received"))
                             });
 
+                            // Send response back to client
                             let _ = server.send_response(&response).await;
+
+                            // Broadcast to all clients (excluding sender)
+                            let _ = server.broadcast(message).await;
                         }
                         Err(e) => {
                             if *is_running.lock().await {
-                                eprintln!("Error handling message: {}", e);
+                                ipc_log!("Error handling message: {}", e);
                             }
                         }
                     }
@@ -495,10 +641,11 @@ impl CommunicationServer for SharedMemoryServer {
                         is_running: is_running.clone(),
                         message_handler: message_handler.clone(),
                         mapping_handle,
+                        broadcast_tx: broadcast_tx.clone(),
                     };
                     match server.wait_for_message().await {
                         Ok(message) => {
-                            ipc_log!("Received message type: {}", message.message_type);
+                            ipc_log!("Server received message type: {}", message.message_type);
 
                             let response = if let Some(ref handler) = *message_handler.lock().await
                             {
@@ -511,15 +658,21 @@ impl CommunicationServer for SharedMemoryServer {
                                 message.create_reply(serde_json::json!("Received"))
                             });
 
+                            // Send response back to client
                             let _ = server.send_response(&response).await;
+
+                            // Broadcast to all clients
+                            let _ = server.broadcast(message).await;
                         }
                         Err(e) => {
                             if *is_running.lock().await {
-                                eprintln!("Error handling message: {}", e);
+                                ipc_log!("Error handling message: {}", e);
                             }
                         }
                     }
                 }
+
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
 
@@ -557,6 +710,11 @@ impl CommunicationServer for SharedMemoryServer {
         });
         Ok(())
     }
+
+    async fn broadcast(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+        let _ = self.broadcast_tx.send(message.clone());
+        self.send_broadcast(&message).await
+    }
 }
 
 /// Shared memory client implementation
@@ -569,7 +727,12 @@ pub struct SharedMemoryClient {
     #[cfg(unix)]
     shm_file: String,
     #[cfg(windows)]
-    mapping_handle: usize,
+    shm_file: String,
+    #[cfg(windows)]
+    mapping_handle: isize,
+    seen_message_ids: std::sync::Mutex<std::collections::HashSet<String>>,
+    last_broadcast_position: std::sync::atomic::AtomicU64,
+    broadcast_rx: Arc<Mutex<tokio::sync::broadcast::Receiver<CommunicationMessage>>>,
 }
 
 impl SharedMemoryClient {
@@ -584,34 +747,24 @@ impl SharedMemoryClient {
                 shm_file,
                 shm_name,
                 connected: false,
+                seen_message_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
+                last_broadcast_position: std::sync::atomic::AtomicU64::new(0),
+                broadcast_rx: Arc::new(Mutex::new(tokio::sync::broadcast::channel(100).1)),
             })
         }
 
         #[cfg(windows)]
         {
-            // Pre-create the file mapping (this will be used by the server)
-            let mapping = unsafe {
-                CreateFileMappingA(
-                    INVALID_HANDLE_VALUE,
-                    std::ptr::null_mut(),
-                    PAGE_READWRITE,
-                    0,
-                    4096,
-                    shm_name.as_ptr() as *const i8,
-                )
-            };
-
-            if mapping.is_null() {
-                return Err(CommunicationError::IoError(
-                    "Failed to create file mapping".to_string(),
-                ));
-            }
-
+            let shm_file = Self::get_shm_file(&config.identifier);
             Ok(Self {
                 config: config.clone(),
                 shm_name,
+                shm_file,
                 connected: false,
-                mapping_handle: mapping as usize,
+                mapping_handle: 0,
+                seen_message_ids: std::sync::Mutex::new(std::collections::HashSet::new()),
+                last_broadcast_position: std::sync::atomic::AtomicU64::new(0),
+                broadcast_rx: Arc::new(Mutex::new(tokio::sync::broadcast::channel(100).1)),
             })
         }
     }
@@ -623,7 +776,12 @@ impl SharedMemoryClient {
 
     #[cfg(windows)]
     fn get_shm_name(identifier: &str) -> String {
-        format!("Local\\IPC_LIB_{}", identifier)
+        format!("Local\\IPC_LIB_SHM_{}", identifier)
+    }
+
+    #[cfg(windows)]
+    fn get_shm_file(identifier: &str) -> String {
+        super::get_temp_path(identifier, "shm")
     }
 
     #[cfg(unix)]
@@ -631,16 +789,120 @@ impl SharedMemoryClient {
         super::get_temp_path(identifier, "shm")
     }
 
+    /// Check if server is still running by attempting to open the mapping
+    async fn check_server_alive(&self) -> bool {
+        #[cfg(unix)]
+        {
+            Path::new(&self.shm_file).exists()
+        }
+
+        #[cfg(windows)]
+        {
+            let mapping = unsafe {
+                OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
+            };
+            if !mapping.is_null() {
+                unsafe {
+                    CloseHandle(mapping as *mut c_void);
+                }
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     async fn wait_for_response(&self) -> Result<CommunicationMessage, CommunicationError> {
         let timeout_duration = Duration::from_millis(self.config.timeout_ms);
         let start_time = std::time::Instant::now();
+        let format = self.config.serialization_format;
+        let shm_file = self.shm_file.clone();
 
         loop {
+            // First check if server is still alive
+            if !self.check_server_alive().await {
+                return Err(CommunicationError::ConnectionFailed(
+                    "Server not running".to_string(),
+                ));
+            }
+
+            // Check for broadcasts from the broadcast file (Unix)
             #[cfg(unix)]
             {
-                // Check if shared memory file exists
-                if !Path::new(&self.shm_name).exists() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                let broadcast_file = format!("{}.broadcast", shm_file);
+                if Path::new(&broadcast_file).exists() {
+                    use std::fs::OpenOptions;
+                    use std::os::unix::fs::FileExt;
+
+                    if let Ok(file) = OpenOptions::new().read(true).write(true).open(&broadcast_file) {
+                        let metadata = file.metadata().ok().map(|m| m.len()).unwrap_or(0);
+                        let last_pos = self.last_broadcast_position.load(std::sync::atomic::Ordering::SeqCst);
+                        
+                        if metadata > last_pos && metadata >= 4 {
+                            // Read from last position
+                            if last_pos < metadata.saturating_sub(4) {
+                                let mut len_bytes = [0u8; 4];
+                                if file.read_exact_at(&mut len_bytes, last_pos).is_ok() {
+                                    let len = u32::from_ne_bytes(len_bytes) as usize;
+                                    let msg_start = last_pos + 4;
+                                    
+                                    if msg_start + len <= metadata as usize {
+                                        let mut msg_bytes = vec![0u8; len];
+                                        if file.read_exact_at(&mut msg_bytes, msg_start).is_ok() {
+                                            let message_res = match format {
+                                                SerializationFormat::Json => {
+                                                    let message_str = String::from_utf8_lossy(&msg_bytes);
+                                                    serde_json::from_str::<CommunicationMessage>(&message_str)
+                                                        .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))
+                                                }
+                                                SerializationFormat::MsgPack => {
+                                                    rmp_serde::from_slice::<CommunicationMessage>(&msg_bytes)
+                                                        .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))
+                                                }
+                                            };
+                                            
+                                            if let Ok(msg) = message_res {
+                                                // Check if already seen
+                                                let id = msg.id.clone();
+                                                let already_seen = {
+                                                    let seen = self.seen_message_ids.lock().unwrap();
+                                                    seen.contains(&id)
+                                                };
+                                                
+                                                if !already_seen {
+                                                    self.seen_message_ids.lock().unwrap().insert(id);
+                                                    self.last_broadcast_position.store(msg_start + len, std::sync::atomic::Ordering::SeqCst);
+                                                    return Ok(msg);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also check the broadcast channel (for in-process broadcasts)
+            let broadcast_rx = self.broadcast_rx.lock().await;
+            if let Ok(msg) = broadcast_rx.try_recv() {
+                let id = msg.id.clone();
+                let already_seen = {
+                    let seen = self.seen_message_ids.lock().unwrap();
+                    seen.contains(&id)
+                };
+                
+                if !already_seen {
+                    self.seen_message_ids.lock().unwrap().insert(id);
+                    return Ok(msg);
+                }
+            }
+
+            #[cfg(unix)]
+            {
+                if !Path::new(&shm_file).exists() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     if start_time.elapsed() >= timeout_duration {
                         return Err(CommunicationError::Timeout(
                             "No response received".to_string(),
@@ -649,64 +911,63 @@ impl SharedMemoryClient {
                     continue;
                 }
 
-                // Map the shared memory (blocking operation)
-                let shm_file = self.shm_name.clone();
-                let format = self.config.serialization_format;
-
                 let result = tokio::task::spawn_blocking(move || {
                     use memmap2::MmapOptions;
                     use std::fs::OpenOptions;
 
                     let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
                     let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+                    let data = mmap.as_ref();
+                    let data_flag = data[DATA_FLAG_OFFSET];
 
-                    // Check if there's data in shared memory
-                    if mmap.as_ref()[0] != 0 {
-                        // First byte indicates if there's data
-                        // Read the message length (first 4 bytes)
+                    // Check for flag 2 (response) or flag 3 (broadcast)
+                    if data_flag == 2 || data_flag == 3 {
                         let len = u32::from_ne_bytes([
-                            mmap.as_ref()[1],
-                            mmap.as_ref()[2],
-                            mmap.as_ref()[3],
-                            mmap.as_ref()[4],
+                            data[LENGTH_OFFSET],
+                            data[LENGTH_OFFSET + 1],
+                            data[LENGTH_OFFSET + 2],
+                            data[LENGTH_OFFSET + 3],
                         ]) as usize;
 
-                        if len > 0 && len < 4096 {
-                            // Read the message bytes (Clone to vector to avoid borrow checker issues)
-                            let message_bytes = mmap.as_ref()[5..5 + len].to_vec();
-
-                            // Clear the shared memory flag immediately
-                            mmap.as_mut()[0] = 0; // Clear data flag
+                        if len > 0 && len < SHM_SIZE - DATA_OFFSET {
+                            let message_bytes = data[DATA_OFFSET..DATA_OFFSET + len].to_vec();
+                            // Clear the flag after reading
+                            mmap.as_mut()[DATA_FLAG_OFFSET] = 0;
                             mmap.flush()?;
 
-                            // Parse and return the message
                             let message_res = match format {
                                 SerializationFormat::Json => {
                                     let message_str = String::from_utf8_lossy(&message_bytes);
                                     serde_json::from_str::<CommunicationMessage>(&message_str)
-                                        .map_err(|e| {
-                                            CommunicationError::DeserializationFailed(e.to_string())
-                                        })
+                                        .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))
                                 }
                                 SerializationFormat::MsgPack => {
                                     rmp_serde::from_slice::<CommunicationMessage>(&message_bytes)
-                                        .map_err(|e| {
-                                            CommunicationError::DeserializationFailed(e.to_string())
-                                        })
+                                        .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))
                                 }
                             };
                             return Ok(Some(message_res?));
                         }
                     }
-                    Ok(None)
+                    Ok::<Option<CommunicationMessage>, CommunicationError>(None)
                 })
                 .await;
 
                 match result {
-                    Ok(Ok(Some(message))) => return Ok(message),
-                    Ok(Ok(None)) => {
-                        // No response yet, continue waiting
+                    Ok(Ok(Some(message))) => {
+                        // Check if already seen (for broadcasts)
+                        let id = message.id.clone();
+                        let already_seen = {
+                            let seen = self.seen_message_ids.lock().unwrap();
+                            seen.contains(&id)
+                        };
+                        
+                        if !already_seen {
+                            self.seen_message_ids.lock().unwrap().insert(id);
+                            return Ok(message);
+                        }
                     }
+                    Ok(Ok(None)) => {}
                     Ok(Err(e)) => return Err(e),
                     Err(_) => {
                         return Err(CommunicationError::IoError(
@@ -718,50 +979,69 @@ impl SharedMemoryClient {
 
             #[cfg(windows)]
             {
-                // Reopen the file mapping (to read from server's data)
-                let mapping = unsafe {
-                    OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
+                let mapping_ptr = if self.mapping_handle != 0 {
+                    self.mapping_handle as *mut c_void
+                } else {
+                    let mapping = unsafe {
+                        OpenFileMappingA(
+                            FILE_MAP_ALL_ACCESS,
+                            0,
+                            self.shm_name.as_ptr() as *const i8,
+                        )
+                    };
+                    if mapping.is_null() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if start_time.elapsed() >= timeout_duration {
+                            return Err(CommunicationError::Timeout(
+                                "No response received".to_string(),
+                            ));
+                        }
+                        continue;
+                    }
+                    mapping as *mut c_void
                 };
 
-                if mapping.is_null() {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    if start_time.elapsed() >= timeout_duration {
-                        return Err(CommunicationError::Timeout(
-                            "No response received".to_string(),
-                        ));
+                let view =
+                    unsafe { MapViewOfFile(mapping_ptr, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
+
+                if view.is_null() {
+                    if self.mapping_handle == 0 {
+                        unsafe {
+                            CloseHandle(mapping_ptr as *mut c_void);
+                        }
                     }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
 
-                // Map the view
-                let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, 4096) };
+                let data: &[u8; SHM_SIZE] = unsafe { &*(view as *const [u8; SHM_SIZE]) };
+                let data_flag = data[DATA_FLAG_OFFSET];
 
-                if view.is_null() {
-                    unsafe {
-                        CloseHandle(mapping);
-                    }
-                    return Err(CommunicationError::IoError(
-                        "Failed to map view".to_string(),
-                    ));
-                }
+                // Check for flag 2 (response) or flag 3 (broadcast)
+                if data_flag == 2 || data_flag == 3 {
+                    let len = u32::from_ne_bytes([
+                        data[LENGTH_OFFSET],
+                        data[LENGTH_OFFSET + 1],
+                        data[LENGTH_OFFSET + 2],
+                        data[LENGTH_OFFSET + 3],
+                    ]) as usize;
 
-                let format = self.config.serialization_format;
+                    if len > 0 && len < SHM_SIZE - DATA_OFFSET {
+                        let message_bytes = data[DATA_OFFSET..DATA_OFFSET + len].to_vec();
 
-                // Read data from shared memory
-                let data: &[u8; 4096] = unsafe { &*(view as *const [u8; 4096]) };
-
-                if data[0] != 0 {
-                    let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
-
-                    if len > 0 && len < 4096 {
-                        let message_bytes = data[5..5 + len].to_vec();
-
-                        // Clear the shared memory flag
                         unsafe {
                             *(view as *mut u8) = 0;
                         }
 
-                        // Parse the message
+                        unsafe {
+                            UnmapViewOfFile(view);
+                        }
+                        if self.mapping_handle == 0 {
+                            unsafe {
+                                CloseHandle(mapping_ptr as *mut c_void);
+                            }
+                        }
+
                         let message_res = match format {
                             SerializationFormat::Json => {
                                 let message_str = String::from_utf8_lossy(&message_bytes);
@@ -771,21 +1051,24 @@ impl SharedMemoryClient {
                             }
                             SerializationFormat::MsgPack => {
                                 rmp_serde::from_slice::<CommunicationMessage>(&message_bytes)
-                                    .map_err(|e| {
-                                        CommunicationError::DeserializationFailed(e.to_string())
-                                    })
+                                    .map_err(|e| CommunicationError::DeserializationFailed(e.to_string()))
                             }
                         };
 
-                        unsafe {
-                            UnmapViewOfFile(view);
-                        }
-                        unsafe {
-                            CloseHandle(mapping);
-                        }
-
                         match message_res {
-                            Ok(msg) => return Ok(msg),
+                            Ok(msg) => {
+                                // Check if already seen (for broadcasts)
+                                let id = msg.id.clone();
+                                let already_seen = {
+                                    let seen = self.seen_message_ids.lock().unwrap();
+                                    seen.contains(&id)
+                                };
+                                
+                                if !already_seen {
+                                    self.seen_message_ids.lock().unwrap().insert(id);
+                                    return Ok(msg);
+                                }
+                            }
                             Err(e) => return Err(e),
                         }
                     }
@@ -794,20 +1077,20 @@ impl SharedMemoryClient {
                 unsafe {
                     UnmapViewOfFile(view);
                 }
-                unsafe {
-                    CloseHandle(mapping);
+                if self.mapping_handle == 0 {
+                    unsafe {
+                        CloseHandle(mapping_ptr as *mut c_void);
+                    }
                 }
             }
 
-            // Check timeout
             if start_time.elapsed() >= timeout_duration {
                 return Err(CommunicationError::Timeout(
                     "No response received".to_string(),
                 ));
             }
 
-            // Wait a bit before checking again
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
 }
@@ -817,8 +1100,7 @@ impl CommunicationClient for SharedMemoryClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         #[cfg(unix)]
         {
-            // Check if shared memory file exists
-            if !Path::new(&self.shm_name).exists() {
+            if !Path::new(&self.shm_file).exists() {
                 return Err(CommunicationError::ConnectionFailed(
                     "Server not running".to_string(),
                 ));
@@ -827,7 +1109,6 @@ impl CommunicationClient for SharedMemoryClient {
 
         #[cfg(windows)]
         {
-            // Check if file mapping exists (server is running)
             let mapping = unsafe {
                 OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
             };
@@ -838,9 +1119,7 @@ impl CommunicationClient for SharedMemoryClient {
                 ));
             }
 
-            unsafe {
-                CloseHandle(mapping);
-            }
+            self.mapping_handle = mapping as isize;
         }
 
         self.connected = true;
@@ -865,64 +1144,77 @@ impl CommunicationClient for SharedMemoryClient {
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
         };
 
+        if message_bytes.len() >= SHM_SIZE - DATA_OFFSET {
+            return Err(CommunicationError::SerializationFailed(
+                "Message too large".to_string(),
+            ));
+        }
+
         #[cfg(unix)]
         {
-            let shm_file = self.shm_name.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                use memmap2::MmapOptions;
-                use std::fs::OpenOptions;
+            use std::fs::OpenOptions;
 
-                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
-                let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.shm_file)?;
+            let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
-                // Write the message to shared memory
-                // Format: [data_flag(1)][length(4)][data(n)]
-                mmap.as_mut()[0] = 1; // Set data flag
-                mmap.as_mut()[1..5].copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
-                mmap.as_mut()[5..5 + message_bytes.len()].copy_from_slice(&message_bytes);
+            mmap.as_mut()[DATA_FLAG_OFFSET] = 1;
+            mmap.as_mut()[LENGTH_OFFSET..LENGTH_OFFSET + 4]
+                .copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
+            mmap.as_mut()[DATA_OFFSET..DATA_OFFSET + message_bytes.len()]
+                .copy_from_slice(&message_bytes);
 
-                mmap.flush()?;
-
-                Ok::<(), CommunicationError>(())
-            })
-            .await;
-
-            match result {
-                Ok(inner) => inner,
-                Err(_) => Err(CommunicationError::IoError(
-                    "Spawn blocking failed".to_string(),
-                )),
-            }
+            mmap.flush()?;
+            Ok(())
         }
 
         #[cfg(windows)]
         {
-            // Use the pre-created mapping handle
-            let view = unsafe {
-                MapViewOfFile(
-                    self.mapping_handle as *mut c_void,
-                    FILE_MAP_ALL_ACCESS,
-                    0,
-                    0,
-                    4096,
-                )
+            let mapping = if self.mapping_handle != 0 {
+                self.mapping_handle as *mut c_void
+            } else {
+                let mapping = unsafe {
+                    OpenFileMappingA(FILE_MAP_ALL_ACCESS, 0, self.shm_name.as_ptr() as *const i8)
+                };
+                if mapping.is_null() {
+                    return Err(CommunicationError::ConnectionFailed(
+                        "Server not running".to_string(),
+                    ));
+                }
+                mapping
             };
 
+            let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, SHM_SIZE) };
+
             if view.is_null() {
+                if self.mapping_handle == 0 {
+                    unsafe {
+                        CloseHandle(mapping as *mut c_void);
+                    }
+                }
                 return Err(CommunicationError::IoError(
                     "Failed to map view".to_string(),
                 ));
             }
 
-            // Write the message
             let view_slice: &mut [u8] =
-                unsafe { std::slice::from_raw_parts_mut(view as *mut u8, 4096) };
-            view_slice[0] = 1; // Set data flag
-            view_slice[1..5].copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
-            view_slice[5..5 + message_bytes.len()].copy_from_slice(&message_bytes);
+                unsafe { std::slice::from_raw_parts_mut(view as *mut u8, SHM_SIZE) };
+            view_slice[DATA_FLAG_OFFSET] = 1;
+            view_slice[LENGTH_OFFSET..LENGTH_OFFSET + 4]
+                .copy_from_slice(&(message_bytes.len() as u32).to_ne_bytes());
+            view_slice[DATA_OFFSET..DATA_OFFSET + message_bytes.len()]
+                .copy_from_slice(&message_bytes);
 
             unsafe {
                 UnmapViewOfFile(view);
+            }
+
+            if self.mapping_handle == 0 {
+                unsafe {
+                    CloseHandle(mapping as *mut c_void);
+                }
             }
             Ok(())
         }
@@ -946,6 +1238,7 @@ impl CommunicationClient for SharedMemoryClient {
                 unsafe {
                     CloseHandle(self.mapping_handle as *mut c_void);
                 }
+                self.mapping_handle = 0;
             }
         }
         Ok(())

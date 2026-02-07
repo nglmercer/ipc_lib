@@ -148,10 +148,7 @@ impl CommunicationConfig {
 
         #[cfg(windows)]
         {
-            vec![
-                ProtocolType::FileBased,
-                ProtocolType::InMemory,
-            ]
+            vec![ProtocolType::FileBased, ProtocolType::InMemory]
         }
     }
 }
@@ -341,7 +338,8 @@ impl CommunicationFactory {
                 #[cfg(not(any(unix, windows)))]
                 {
                     Err(CommunicationError::ProtocolNotSupported(
-                        "SharedMemory is only supported on Unix-like systems and Windows".to_string(),
+                        "SharedMemory is only supported on Unix-like systems and Windows"
+                            .to_string(),
                     ))
                 }
             }
