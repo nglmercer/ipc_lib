@@ -244,18 +244,18 @@ impl CommunicationServer for UnixSocketServer {
 #[derive(Debug)]
 pub struct UnixSocketClient {
     config: CommunicationConfig,
-    reader: Option<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
-    writer: Option<tokio::net::unix::OwnedWriteHalf>,
-    connected: bool,
+    reader: tokio::sync::Mutex<Option<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>>,
+    writer: tokio::sync::Mutex<Option<tokio::net::unix::OwnedWriteHalf>>,
+    connected: std::sync::atomic::AtomicBool,
 }
 
 impl UnixSocketClient {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
         Ok(Self {
             config: config.clone(),
-            reader: None,
-            writer: None,
-            connected: false,
+            reader: tokio::sync::Mutex::new(None),
+            writer: tokio::sync::Mutex::new(None),
+            connected: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -269,61 +269,73 @@ impl CommunicationClient for UnixSocketClient {
         let stream = UnixStream::connect(&socket_path).await?;
         let (reader_half, writer_half) = stream.into_split();
 
-        self.reader = Some(tokio::io::BufReader::new(reader_half));
-        self.writer = Some(writer_half);
-        self.connected = true;
+        *self.reader.get_mut() = Some(tokio::io::BufReader::new(reader_half));
+        *self.writer.get_mut() = Some(writer_half);
+        self.connected.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     async fn send_message(
-        &mut self,
+        &self,
         message: &CommunicationMessage,
     ) -> Result<(), CommunicationError> {
-        if !self.connected {
+        if !self.connected.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),
             ));
         }
 
-        let writer = self.writer.as_mut().unwrap();
-        let mut message_json = serde_json::to_string(message)?;
-        message_json.push('\n');
-        writer.write_all(message_json.as_bytes()).await?;
-        Ok(())
+        let mut writer_guard = self.writer.lock().await;
+        if let Some(writer) = writer_guard.as_mut() {
+            let mut message_json = serde_json::to_string(message)?;
+            message_json.push('\n');
+            writer.write_all(message_json.as_bytes()).await?;
+            Ok(())
+        } else {
+             Err(CommunicationError::ConnectionFailed(
+                "Writer not initialized".to_string(),
+            ))
+        }
     }
 
-    async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
-        if !self.connected {
+    async fn receive_message(&self) -> Result<CommunicationMessage, CommunicationError> {
+        if !self.connected.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),
             ));
         }
 
         use tokio::io::AsyncBufReadExt;
-        let reader = self.reader.as_mut().unwrap();
-        let mut line = String::new();
+        let mut reader_guard = self.reader.lock().await; 
+        
+        if let Some(reader) = reader_guard.as_mut() {
+            let mut line = String::new();
+            let bytes_read = reader.read_line(&mut line).await?;
+            if bytes_read == 0 {
+                return Err(CommunicationError::ConnectionFailed(
+                    "Connection closed".to_string(),
+                ));
+            }
 
-        let bytes_read = reader.read_line(&mut line).await?;
-        if bytes_read == 0 {
-            return Err(CommunicationError::ConnectionFailed(
-                "Connection closed".to_string(),
-            ));
+            let message: CommunicationMessage = serde_json::from_str(&line)
+                .map_err(|e| CommunicationError::DeserializationFailed(format!("{}: {}", e, line)))?;
+
+            Ok(message)
+        } else {
+             Err(CommunicationError::ConnectionFailed(
+                "Reader not initialized".to_string(),
+            ))
         }
-
-        let message: CommunicationMessage = serde_json::from_str(&line)
-            .map_err(|e| CommunicationError::DeserializationFailed(format!("{}: {}", e, line)))?;
-
-        Ok(message)
     }
 
     async fn disconnect(&mut self) -> Result<(), CommunicationError> {
-        self.reader = None;
-        self.writer = None;
-        self.connected = false;
+        *self.reader.get_mut() = None;
+        *self.writer.get_mut() = None;
+        self.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     fn is_connected(&self) -> bool {
-        self.connected
+        self.connected.load(std::sync::atomic::Ordering::SeqCst)
     }
 }

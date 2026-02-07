@@ -398,7 +398,7 @@ impl CommunicationClient for SharedMemoryClient {
     }
 
     async fn send_message(
-        &mut self,
+        &self,
         message: &CommunicationMessage,
     ) -> Result<(), CommunicationError> {
         if !self.connected {
@@ -435,7 +435,7 @@ impl CommunicationClient for SharedMemoryClient {
         }
     }
 
-    async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
+    async fn receive_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),

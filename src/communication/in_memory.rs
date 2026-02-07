@@ -204,7 +204,7 @@ impl CommunicationClient for InMemoryClient {
     }
 
     async fn send_message(
-        &mut self,
+        &self,
         message: &CommunicationMessage,
     ) -> Result<(), CommunicationError> {
         if !self.connected {
@@ -213,8 +213,9 @@ impl CommunicationClient for InMemoryClient {
             ));
         }
 
-        let sender_opt = self.message_sender.lock().await.take();
-        if let Some(sender) = sender_opt {
+        let mut sender_opt_guard = self.message_sender.lock().await;
+
+        if let Some(sender) = sender_opt_guard.as_mut() {
             sender
                 .send(message.clone())
                 .await
@@ -227,7 +228,7 @@ impl CommunicationClient for InMemoryClient {
         }
     }
 
-    async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError> {
+    async fn receive_message(&self) -> Result<CommunicationMessage, CommunicationError> {
         if !self.connected {
             return Err(CommunicationError::ConnectionFailed(
                 "Not connected".to_string(),

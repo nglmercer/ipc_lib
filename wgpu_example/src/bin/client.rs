@@ -1,7 +1,5 @@
 use single_instance_app::{
-    communication::ProtocolType,
-    communication::CommunicationMessage,
-    IpcClient,
+    communication::CommunicationMessage, communication::ProtocolType, IpcClient,
 };
 use std::time::{Duration, Instant};
 
@@ -10,8 +8,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identifier = "wgpu_render_server";
     println!("🔗 Connecting to wgpu Render Server: {}...", identifier);
 
-    let client = IpcClient::new(identifier)?
-        .with_protocol(ProtocolType::UnixSocket);
+    let client = IpcClient::new(identifier)?.with_protocol(ProtocolType::UnixSocket);
 
     let messenger = loop {
         match client.connect_messenger().await {
@@ -32,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         let elapsed = start_time.elapsed().as_secs_f32();
-        
+
         // Generate an animated pattern: a moving square
         let square_size = 100;
         let square_x = ((elapsed.sin() * 0.5 + 0.5) * (width - square_size) as f32) as usize;
@@ -46,12 +43,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for y in 0..height {
             for x in 0..width {
                 let offset = (y * width + x) * 4;
-                
-                if x >= square_x && x < square_x + square_size && y >= square_y && y < square_y + square_size {
+
+                if x >= square_x
+                    && x < square_x + square_size
+                    && y >= square_y
+                    && y < square_y + square_size
+                {
                     // Square color
-                    pixels[offset] = 255;     // R
+                    pixels[offset] = 255; // R
                     pixels[offset + 1] = 255; // G
-                    pixels[offset + 2] = 0;   // B
+                    pixels[offset + 2] = 0; // B
                     pixels[offset + 3] = 255; // A
                 } else {
                     // Background color
@@ -64,16 +65,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Encode pixels as Base64 string to avoid JSON overhead
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
         let pixels_b64 = general_purpose::STANDARD.encode(&pixels);
 
-        let msg = CommunicationMessage::new("render_frame", serde_json::json!({
-            "pixels_b64": pixels_b64
-        }));
+        let msg = CommunicationMessage::new(
+            "render_frame",
+            serde_json::json!({
+                "pixels_b64": pixels_b64
+            }),
+        );
 
         let msg_id = msg.id.clone();
         println!("📤 Sending frame... ID: {}", msg_id);
-        
+
         // Send the frame.
         match messenger.request(msg).await {
             Ok(_) => {

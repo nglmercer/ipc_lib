@@ -1,7 +1,4 @@
-use single_instance_app::{
-    communication::ProtocolType,
-    SingleInstanceApp,
-};
+use single_instance_app::{communication::ProtocolType, SingleInstanceApp};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -40,10 +37,22 @@ impl Vertex {
 }
 
 const VERTICES: &[Vertex] = &[
-    Vertex { position: [-1.0, 1.0, 0.0], tex_coords: [0.0, 0.0] },
-    Vertex { position: [-1.0, -1.0, 0.0], tex_coords: [0.0, 1.0] },
-    Vertex { position: [1.0, -1.0, 0.0], tex_coords: [1.0, 1.0] },
-    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [1.0, 0.0] },
+    Vertex {
+        position: [-1.0, 1.0, 0.0],
+        tex_coords: [0.0, 0.0],
+    },
+    Vertex {
+        position: [-1.0, -1.0, 0.0],
+        tex_coords: [0.0, 1.0],
+    },
+    Vertex {
+        position: [1.0, -1.0, 0.0],
+        tex_coords: [1.0, 1.0],
+    },
+    Vertex {
+        position: [1.0, 1.0, 0.0],
+        tex_coords: [1.0, 0.0],
+    },
 ];
 
 const INDICES: &[u16] = &[0, 1, 2, 0, 2, 3];
@@ -74,12 +83,18 @@ impl State {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let surface = instance.create_surface(window.clone()).unwrap();
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }).await.unwrap();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
 
-        let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await.unwrap();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await
+            .unwrap();
         let surface_caps = surface.get_capabilities(&adapter);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -93,7 +108,11 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let texture_size = wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 };
+        let texture_size = wgpu::Extent3d {
+            width: 512,
+            height: 512,
+            depth_or_array_layers: 1,
+        };
         let diffuse_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Diffuse Texture"),
             size: texture_size,
@@ -105,39 +124,47 @@ impl State {
             view_formats: &[],
         });
 
-        let diffuse_texture_view = diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let diffuse_texture_view =
+            diffuse_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let diffuse_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-            label: None,
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+                label: None,
+            });
 
         let diffuse_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&diffuse_texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&diffuse_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&diffuse_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&diffuse_sampler),
+                },
             ],
             label: None,
         });
@@ -147,11 +174,12 @@ impl State {
             source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&texture_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
@@ -192,10 +220,18 @@ impl State {
         });
 
         Self {
-            window, surface, device, queue, config, size,
-            render_pipeline, vertex_buffer, index_buffer,
+            window,
+            surface,
+            device,
+            queue,
+            config,
+            size,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
             num_indices: INDICES.len() as u32,
-            diffuse_bind_group, diffuse_texture,
+            diffuse_bind_group,
+            diffuse_texture,
         }
     }
 
@@ -226,14 +262,22 @@ impl State {
                 bytes_per_row: Some(512 * 4),
                 rows_per_image: Some(512),
             },
-            wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
@@ -264,16 +308,36 @@ impl State {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_none() {
-            let window = Arc::new(event_loop.create_window(WindowAttributes::default().with_title("wgpu DIRECT Buffer (IPC Mapping)")).unwrap());
+            let window = Arc::new(
+                event_loop
+                    .create_window(
+                        WindowAttributes::default().with_title("wgpu DIRECT Buffer (IPC Mapping)"),
+                    )
+                    .unwrap(),
+            );
             self.state = Some(pollster::block_on(State::new(window)));
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: winit::window::WindowId, event: WindowEvent) {
-        let Some(state) = self.state.as_mut() else { return };
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
         match event {
-            WindowEvent::CloseRequested | WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape), .. }, ..
+            WindowEvent::CloseRequested
+            | WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        logical_key: winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape),
+                        ..
+                    },
+                ..
             } => event_loop.exit(),
             WindowEvent::Resized(physical_size) => state.resize(physical_size),
             WindowEvent::RedrawRequested => {
@@ -304,37 +368,43 @@ impl ApplicationHandler for App {
 #[tokio::main]
 async fn main() {
     env_logger::init();
-    
+
     let shared_pixels = Arc::new(Mutex::new(vec![0u8; 512 * 512 * 4]));
     let new_frame_available = Arc::new(Mutex::new(false));
-    
+
     let pixels_for_ipc = shared_pixels.clone();
     let flag_for_ipc = new_frame_available.clone();
-    
+
     let identifier = "wgpu_render_server";
     let mut ipc_app = SingleInstanceApp::new(identifier)
         .with_protocol(ProtocolType::UnixSocket)
         .on_message(move |msg| {
             if msg.message_type == "render_frame" {
                 println!("📥 Server: Received render_frame message ID: {}", msg.id);
-                
+
                 // Try Base64 encoded payload (optimized)
                 if let Some(pixels_b64_val) = msg.payload.get("pixels_b64") {
                     if let Some(b64_str) = pixels_b64_val.as_str() {
-                        use base64::{Engine as _, engine::general_purpose};
+                        use base64::{engine::general_purpose, Engine as _};
                         if let Ok(pixels) = general_purpose::STANDARD.decode(b64_str) {
                             if pixels.len() != 512 * 512 * 4 {
                                 eprintln!("⚠️ Received frame with wrong size: {}", pixels.len());
                                 return None;
                             }
-                            
-                            let mut p = pixels_for_ipc.lock().unwrap();
-                            *p = pixels;
-                            let mut f = flag_for_ipc.lock().unwrap();
-                            *f = true;
-                            
+
+                            {
+                                let mut p = pixels_for_ipc.lock().unwrap();
+                                *p = pixels;
+                            }
+                            {
+                                let mut f = flag_for_ipc.lock().unwrap();
+                                *f = true;
+                            }
+
                             // println!("Frame updated!");
-                            return Some(msg.create_reply(serde_json::json!({"status": "received"})));
+                            return Some(
+                                msg.create_reply(serde_json::json!({"status": "received"})),
+                            );
                         } else {
                             eprintln!("⚠️ Failed to decode Base64 pixels");
                         }
@@ -350,17 +420,20 @@ async fn main() {
                             eprintln!("⚠️ Received frame with wrong size: {}", arr.len());
                             return None;
                         }
-                        
-                        // Manually convert to Vec<u8> to be safer/faster than full deserialization
-                        let pixels: Vec<u8> = arr.iter()
-                            .map(|v| v.as_u64().unwrap_or(0) as u8)
-                            .collect();
 
-                        let mut p = pixels_for_ipc.lock().unwrap();
-                        *p = pixels;
-                        let mut f = flag_for_ipc.lock().unwrap();
-                        *f = true;
-                        
+                        // Manually convert to Vec<u8> to be safer/faster than full deserialization
+                        let pixels: Vec<u8> =
+                            arr.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect();
+
+                        {
+                            let mut p = pixels_for_ipc.lock().unwrap();
+                            *p = pixels;
+                        }
+                        {
+                            let mut f = flag_for_ipc.lock().unwrap();
+                            *f = true;
+                        }
+
                         // println!("Frame updated!");
 
                         // Return a confirmation response
@@ -376,7 +449,7 @@ async fn main() {
         });
 
     println!("🚀 Starting wgpu Render Server on IPC: {}", identifier);
-    
+
     // Start IPC in background
     tokio::spawn(async move {
         if let Err(e) = ipc_app.enforce_single_instance().await {
@@ -385,10 +458,10 @@ async fn main() {
     });
 
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App { 
-        state: None, 
-        shared_pixels, 
-        new_frame_available 
+    let mut app = App {
+        state: None,
+        shared_pixels,
+        new_frame_available,
     };
     event_loop.run_app(&mut app).unwrap();
 }

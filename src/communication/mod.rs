@@ -253,12 +253,12 @@ pub trait CommunicationClient: Send + Sync {
 
     /// Send a message to the server
     async fn send_message(
-        &mut self,
+        &self,
         message: &CommunicationMessage,
     ) -> Result<(), CommunicationError>;
 
     /// Receive a message from the server
-    async fn receive_message(&mut self) -> Result<CommunicationMessage, CommunicationError>;
+    async fn receive_message(&self) -> Result<CommunicationMessage, CommunicationError>;
 
     /// Disconnect from the server
     async fn disconnect(&mut self) -> Result<(), CommunicationError>;

@@ -388,14 +388,14 @@ impl RequestBroker {
 
 /// A wrapper around IPC communication that provides high-level messaging features
 pub struct Messenger {
-    session: Arc<TokioMutex<IpcSession>>,
+    session: Arc<IpcSession>,
     broker: Arc<RequestBroker>,
 }
 
 impl Messenger {
     pub fn new(session: IpcSession) -> Self {
         let messenger = Self {
-            session: Arc::new(TokioMutex::new(session)),
+            session: Arc::new(session),
             broker: Arc::new(RequestBroker::new()),
         };
 
@@ -411,11 +411,8 @@ impl Messenger {
 
         tokio::spawn(async move {
             loop {
-                let mut session_guard = session.lock().await;
-                match session_guard.receive().await {
+                match session.receive().await {
                     Ok(msg) => {
-                        // Drop lock while dispatching to avoid deadlocks
-                        drop(session_guard);
                         if !broker.dispatch_response(msg.clone()).await {
                             // If not a response, it might be an unsolicited message
                             // In a real implementation we would have a separate
@@ -440,7 +437,7 @@ impl Messenger {
         let id = message.id.clone();
         let rx = self.broker.register_request(id).await;
 
-        self.session.lock().await.send(message).await?;
+        self.session.send(message).await?;
 
         match rx.await {
             Ok(resp) => Ok(resp),
@@ -452,7 +449,7 @@ impl Messenger {
 
     /// Send a message without waiting for response
     pub async fn send(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
-        self.session.lock().await.send(message).await
+        self.session.send(message).await
     }
 }
 
@@ -515,12 +512,12 @@ pub struct IpcSession {
 
 impl IpcSession {
     /// Send a message to the other end
-    pub async fn send(&mut self, message: CommunicationMessage) -> Result<(), CommunicationError> {
+    pub async fn send(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
         self.client.send_message(&message).await
     }
 
     /// Receive a message from the other end
-    pub async fn receive(&mut self) -> Result<CommunicationMessage, CommunicationError> {
+    pub async fn receive(&self) -> Result<CommunicationMessage, CommunicationError> {
         self.client.receive_message().await
     }
 
