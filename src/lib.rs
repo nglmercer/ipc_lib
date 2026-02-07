@@ -645,7 +645,10 @@ mod tests {
     #[test]
     fn test_ipc_client_default_protocol() {
         let client = IpcClient::new("test_client").unwrap();
+        #[cfg(unix)]
         assert_eq!(client.config().protocol, ProtocolType::UnixSocket);
+        #[cfg(windows)]
+        assert_eq!(client.config().protocol, ProtocolType::NamedPipe);
     }
 
     // ============ IpcServer Tests ============
@@ -893,16 +896,34 @@ mod tests {
 
     #[test]
     fn test_communication_factory_create_protocols() {
-        let protocols = vec![
-            ProtocolType::UnixSocket,
-            ProtocolType::SharedMemory,
-            ProtocolType::FileBased,
-            ProtocolType::InMemory,
-        ];
+        // FileBased and InMemory are always available
+        let always_available = vec![ProtocolType::FileBased, ProtocolType::InMemory];
 
-        for protocol in protocols {
+        for protocol in always_available {
             let result = communication::CommunicationFactory::create_protocol(protocol);
             assert!(result.is_ok());
+        }
+
+        // Unix-specific protocols only on Unix
+        #[cfg(unix)]
+        {
+            let unix_protocols = vec![ProtocolType::UnixSocket, ProtocolType::SharedMemory];
+
+            for protocol in unix_protocols {
+                let result = communication::CommunicationFactory::create_protocol(protocol);
+                assert!(result.is_ok());
+            }
+        }
+
+        // Windows-specific protocols only on Windows
+        #[cfg(windows)]
+        {
+            let windows_protocols = vec![ProtocolType::NamedPipe];
+
+            for protocol in windows_protocols {
+                let result = communication::CommunicationFactory::create_protocol(protocol);
+                assert!(result.is_ok());
+            }
         }
     }
 

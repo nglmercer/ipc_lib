@@ -5,7 +5,6 @@ use super::*;
 use crate::ipc_log;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
 
@@ -23,21 +22,39 @@ impl CommunicationProtocol for UnixSocketProtocol {
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
-        Ok(Box::new(UnixSocketServer::new(config)?))
+        #[cfg(unix)]
+        {
+            Ok(Box::new(UnixSocketServer::new(config)?))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(CommunicationError::ConnectionFailed(
+                "Unix socket protocol is not supported on Windows".to_string(),
+            ))
+        }
     }
 
     async fn create_client(
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
-        Ok(Box::new(UnixSocketClient::new(config)?))
+        #[cfg(unix)]
+        {
+            Ok(Box::new(UnixSocketClient::new(config)?))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(CommunicationError::ConnectionFailed(
+                "Unix socket protocol is not supported on Windows".to_string(),
+            ))
+        }
     }
 }
 
 /// Unix Domain Socket server implementation
 pub struct UnixSocketServer {
     config: CommunicationConfig,
-    listener: Arc<Mutex<Option<UnixListener>>>,
+    listener: Arc<Mutex<Option<tokio::net::UnixListener>>>,
     is_running: Arc<Mutex<bool>>,
     broadcast_tx: tokio::sync::broadcast::Sender<CommunicationMessage>,
     message_handler: SharedMessageHandler,
@@ -82,7 +99,7 @@ impl UnixSocketServer {
 
     async fn handle_client(
         &self,
-        stream: UnixStream,
+        stream: tokio::net::UnixStream,
         mut broadcast_rx: tokio::sync::broadcast::Receiver<CommunicationMessage>,
     ) -> Result<(), CommunicationError> {
         use tokio::io::AsyncBufReadExt;
@@ -201,7 +218,7 @@ impl CommunicationServer for UnixSocketServer {
         let socket_path = Self::get_socket_path(&self.config.identifier);
 
         ipc_log!("UnixSocketServer starting on {}", socket_path);
-        let listener_bound = UnixListener::bind(&socket_path)?;
+        let listener_bound = tokio::net::UnixListener::bind(&socket_path)?;
         *self.listener.lock().await = Some(listener_bound);
         *self.is_running.lock().await = true;
 
@@ -313,7 +330,7 @@ impl CommunicationClient for UnixSocketClient {
         let socket_path = format!("/tmp/{}.sock", self.config.identifier);
         ipc_log!("UnixSocketClient connecting to {}", socket_path);
 
-        let stream = UnixStream::connect(&socket_path).await?;
+        let stream = tokio::net::UnixStream::connect(&socket_path).await?;
         let (reader_half, writer_half) = stream.into_split();
 
         *self.reader.get_mut() = Some(tokio::io::BufReader::new(reader_half));

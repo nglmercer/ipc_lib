@@ -1,12 +1,10 @@
 //! Shared memory communication protocol implementation
 //! Provides IPC communication using memory-mapped files
-//! Works on most platforms and provides fast inter-process communication
+//! Works on Unix-like systems and provides fast inter-process communication
 
 use super::*;
 use crate::ipc_log;
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -26,14 +24,32 @@ impl CommunicationProtocol for SharedMemoryProtocol {
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
-        Ok(Box::new(SharedMemoryServer::new(config)?))
+        #[cfg(unix)]
+        {
+            Ok(Box::new(SharedMemoryServer::new(config)?))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(CommunicationError::ConnectionFailed(
+                "Shared memory protocol is not supported on Windows".to_string(),
+            ))
+        }
     }
 
     async fn create_client(
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
-        Ok(Box::new(SharedMemoryClient::new(config)?))
+        #[cfg(unix)]
+        {
+            Ok(Box::new(SharedMemoryClient::new(config)?))
+        }
+        #[cfg(not(unix))]
+        {
+            Err(CommunicationError::ConnectionFailed(
+                "Shared memory protocol is not supported on Windows".to_string(),
+            ))
+        }
     }
 }
 
@@ -66,16 +82,34 @@ impl SharedMemoryServer {
         }
 
         // Create the shared memory file
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&shm_file)?;
+        #[cfg(unix)]
+        {
+            use std::fs::OpenOptions;
+            use std::os::unix::fs::OpenOptionsExt;
 
-        // Set file size to accommodate our message buffer
-        file.set_len(4096)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&shm_file)?;
+
+            // Set file size to accommodate our message buffer
+            file.set_len(4096)?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&shm_file)?;
+
+            file.set_len(4096)?;
+        }
 
         Ok(Self {
             config: config.clone(),
@@ -113,14 +147,14 @@ impl SharedMemoryServer {
                 continue;
             }
 
-            // Map the shared memory (this is blocking, but memmap2 doesn't have async)
-            // We use tokio::task::spawn_blocking for this
             // Map the shared memory (blocking operation)
-            // We use tokio::task::spawn_blocking for this
             let shm_file = self.shm_file.clone();
             let format = self.config.serialization_format;
             let result = tokio::task::spawn_blocking(move || {
-                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
                 // Check if there's data in shared memory
@@ -199,7 +233,10 @@ impl SharedMemoryServer {
         };
 
         let result = tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
             // Write the response to shared memory
@@ -283,7 +320,6 @@ impl CommunicationServer for SharedMemoryServer {
 
     fn is_running(&self) -> bool {
         // Use a non-blocking attempt to check running status
-        // This is a best-effort check; in async contexts, prefer await
         match self.is_running.try_lock() {
             Ok(guard) => *guard,
             Err(_) => {
@@ -347,7 +383,10 @@ impl SharedMemoryClient {
             let shm_file = self.shm_file.clone();
             let format = self.config.serialization_format;
             let result = tokio::task::spawn_blocking(move || {
-                let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&shm_file)?;
                 let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
                 // Check if there's data in shared memory
@@ -438,12 +477,6 @@ impl CommunicationClient for SharedMemoryClient {
         let shm_file = self.shm_file.clone();
         let format = self.config.serialization_format;
 
-        // Serialize first to avoid borrowing issues in closure if we passed &message
-        // But message is &CommunicationMessage. We can't move it.
-        // We can serialize here before spawning, but spawning is for blocking IO (open file).
-        // Serialization is CPU bound. Doing it here is fine or inside.
-        // Let's clone message to move into closure? No, expensive.
-        // Serialize to bytes here.
         let message_bytes = match format {
             SerializationFormat::Json => {
                 let s = serde_json::to_string(message)?;
@@ -454,7 +487,10 @@ impl CommunicationClient for SharedMemoryClient {
         };
 
         let result = tokio::task::spawn_blocking(move || {
-            let file = OpenOptions::new().read(true).write(true).open(&shm_file)?;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&shm_file)?;
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
 
             // Write the message to shared memory
