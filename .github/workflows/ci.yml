@@ -48,6 +48,7 @@ jobs:
     name: Cross-platform Build
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target:
           - x86_64-unknown-linux-gnu
@@ -57,6 +58,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install mingw-w64 for Windows
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
 
       - name: Build for ${{ matrix.target }}
         uses: dtolnay/rust-toolchain@stable
@@ -87,8 +94,8 @@ jobs:
       - name: Build ipc_chat_example
         run: cargo build --release -p ipc_chat_example
 
-      - name: Build ipc_wgpu_example
-        run: cargo build --release -p ipc_wgpu_example
+      - name: Build wgpu_example
+        run: cargo build --release -p wgpu_example
 
   # Security audit
   security-audit:
@@ -129,5 +136,5 @@ jobs:
       - name: Publish ipc_chat_example
         run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p ipc_chat_example
 
-      - name: Publish ipc_wgpu_example
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p ipc_wgpu_example
+      - name: Publish wgpu_example
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p wgpu_example
