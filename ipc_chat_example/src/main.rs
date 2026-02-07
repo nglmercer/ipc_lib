@@ -1,28 +1,33 @@
 //! IPC Chat Example
-//! 
+//!
 //! This example demonstrates a real-time chat application using IPC communication
 //! between multiple instances of the application.
 
 use single_instance_app::{
-    communication::ProtocolType,
-    communication::CommunicationMessage,
-    IpcClient,
-    SingleInstanceApp,
+    communication::CommunicationMessage, communication::ProtocolType, IpcClient, SingleInstanceApp,
 };
 use std::env;
 use std::process;
 
-async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Option<SingleInstanceApp>) {
+async fn run_client_chat(
+    username: &str,
+    client: Option<IpcClient>,
+    host_app: Option<SingleInstanceApp>,
+) {
     let is_host = host_app.is_some();
-    println!("💬 Chat session as {} ({})", username, if is_host { "Host" } else { "Client" });
+    println!(
+        "💬 Chat session as {} ({})",
+        username,
+        if is_host { "Host" } else { "Client" }
+    );
     println!("═══ Chat Commands ═══");
     println!("  <message>   - Send a message to the other instance");
     println!("  /quit       - Exit chat");
     println!("═══════════════════════");
     println!();
-    
+
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<String>(100);
-    
+
     // Background task for stdin
     tokio::spawn(async move {
         loop {
@@ -61,7 +66,11 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
             }
         }
     } else {
-        let mut session = client.unwrap().connect_persistent().await.expect("Failed to connect");
+        let mut session = client
+            .unwrap()
+            .connect_persistent()
+            .await
+            .expect("Failed to connect");
         let client_username = username.to_string();
         print!("> ");
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -73,7 +82,7 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                         if content == "/quit" || content == "/exit" { break; }
                         let msg = CommunicationMessage::new("chat", serde_json::json!(content))
                             .with_source(&client_username);
-                        
+
                         // Try to send, and reconnect if it fails
                         if let Err(_) = session.send(msg).await {
                              println!("\r⚠️ Send failed, attempting to reconnect...");
@@ -88,7 +97,7 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                                  break;
                              }
                         }
-                        
+
                         println!("📤 Sent: {}", content);
                         print!("> ");
                         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -118,7 +127,7 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
                                     break;
                                 }
                             }
-                            
+
                             if !reconnected {
                                 println!("❌ Could not reconnect.");
                                 break;
@@ -133,7 +142,6 @@ async fn run_client_chat(username: &str, client: Option<IpcClient>, host_app: Op
     }
 }
 
-
 #[tokio::main]
 async fn main() {
     println!("╔══════════════════════════════════════════╗");
@@ -144,14 +152,15 @@ async fn main() {
 
     let args: Vec<String> = env::args().collect();
     let identifier = "ipc_chat_example";
-    
+
     // Check if logging should be enabled
     if args.iter().any(|arg| arg == "--log") {
         single_instance_app::enable_logging();
         println!("📝 Logging enabled");
     }
 
-    let username = args.get(1)
+    let username = args
+        .get(1)
         .filter(|s| !s.starts_with("--") && *s != "join")
         .cloned()
         .unwrap_or_else(|| {

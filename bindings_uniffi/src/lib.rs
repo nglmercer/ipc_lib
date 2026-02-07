@@ -96,12 +96,14 @@ impl From<single_instance_app::communication::CommunicationMessage> for Communic
 }
 
 impl CommunicationMessage {
-    pub fn to_inner(&self) -> Result<single_instance_app::communication::CommunicationMessage, String> {
+    pub fn to_inner(
+        &self,
+    ) -> Result<single_instance_app::communication::CommunicationMessage, String> {
         let payload: serde_json::Value = serde_json::from_str(&self.payload_json)
             .map_err(|e| format!("Invalid JSON payload: {}", e))?;
         let metadata: serde_json::Value = serde_json::from_str(&self.metadata_json)
             .map_err(|e| format!("Invalid JSON metadata: {}", e))?;
-            
+
         Ok(single_instance_app::communication::CommunicationMessage {
             id: self.id.clone(),
             message_type: self.message_type.clone(),
@@ -131,7 +133,9 @@ impl SingleInstanceApp {
     #[uniffi::constructor]
     pub fn new(identifier: String) -> Self {
         Self {
-            inner: Mutex::new(Some(single_instance_app::SingleInstanceApp::new(&identifier))),
+            inner: Mutex::new(Some(single_instance_app::SingleInstanceApp::new(
+                &identifier,
+            ))),
         }
     }
 
@@ -141,50 +145,70 @@ impl SingleInstanceApp {
             *guard = Some(app.with_protocol(protocol.into()));
             Ok(())
         } else {
-             Err(CommunicationError::Unknown("App instance invalid".to_string()))
+            Err(CommunicationError::Unknown(
+                "App instance invalid".to_string(),
+            ))
         }
     }
 
-    pub async fn on_message(&self, handler: Box<dyn MessageHandler>) -> Result<(), CommunicationError> {
+    pub async fn on_message(
+        &self,
+        handler: Box<dyn MessageHandler>,
+    ) -> Result<(), CommunicationError> {
         let mut guard = self.inner.lock().await;
         if let Some(app) = guard.take() {
-             let handler = Arc::new(handler);
-             // Create a closure that calls the foreign handler
-             let callback = move |msg: single_instance_app::communication::CommunicationMessage| {
-                 let outer_msg = CommunicationMessage::from(msg);
-                 let response = handler.on_message(outer_msg);
-                 
-                 match response {
-                     Some(r) => r.to_inner().ok(), // If conversion fails, duplicate handling sucks but return None
-                     None => None,
-                 }
-             };
+            let handler = Arc::new(handler);
+            // Create a closure that calls the foreign handler
+            let callback = move |msg: single_instance_app::communication::CommunicationMessage| {
+                let outer_msg = CommunicationMessage::from(msg);
+                let response = handler.on_message(outer_msg);
+
+                match response {
+                    Some(r) => r.to_inner().ok(), // If conversion fails, duplicate handling sucks but return None
+                    None => None,
+                }
+            };
             *guard = Some(app.on_message(callback));
             Ok(())
         } else {
-             Err(CommunicationError::Unknown("App instance invalid".to_string()))
+            Err(CommunicationError::Unknown(
+                "App instance invalid".to_string(),
+            ))
         }
     }
 
     pub async fn enforce_single_instance(&self) -> Result<bool, CommunicationError> {
         let mut guard = self.inner.lock().await;
         if let Some(app) = guard.as_mut() {
-            app.enforce_single_instance().await.map_err(CommunicationError::from)
+            app.enforce_single_instance()
+                .await
+                .map_err(CommunicationError::from)
         } else {
-            Err(CommunicationError::Unknown("App instance invalid".to_string()))
+            Err(CommunicationError::Unknown(
+                "App instance invalid".to_string(),
+            ))
         }
     }
-    
-    pub async fn broadcast(&self, message_type: String, payload_json: String) -> Result<(), CommunicationError> {
+
+    pub async fn broadcast(
+        &self,
+        message_type: String,
+        payload_json: String,
+    ) -> Result<(), CommunicationError> {
         let guard = self.inner.lock().await;
         if let Some(app) = guard.as_ref() {
             let payload: serde_json::Value = serde_json::from_str(&payload_json)
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?;
-                
-            let msg = single_instance_app::communication::CommunicationMessage::new(&message_type, payload);
+
+            let msg = single_instance_app::communication::CommunicationMessage::new(
+                &message_type,
+                payload,
+            );
             app.broadcast(msg).await.map_err(CommunicationError::from)
         } else {
-            Err(CommunicationError::Unknown("App instance invalid".to_string()))
+            Err(CommunicationError::Unknown(
+                "App instance invalid".to_string(),
+            ))
         }
     }
 }

@@ -46,14 +46,13 @@ pub extern "C" fn ipc_app_new(identifier: *const c_char) -> *mut AppHandle {
 
     let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
     let messages_clone = messages.clone();
-    
-    let app = single_instance_app::SingleInstanceApp::new(identifier)
-        .on_message(move |msg| {
-            // Store received messages in the queue
-            messages_clone.lock().unwrap().push(msg.clone());
-            // Return a response to acknowledge receipt
-            Some(msg.create_reply(serde_json::json!("received")))
-        });
+
+    let app = single_instance_app::SingleInstanceApp::new(identifier).on_message(move |msg| {
+        // Store received messages in the queue
+        messages_clone.lock().unwrap().push(msg.clone());
+        // Return a response to acknowledge receipt
+        Some(msg.create_reply(serde_json::json!("received")))
+    });
 
     Box::into_raw(Box::new(AppHandle {
         app,
@@ -72,10 +71,13 @@ pub extern "C" fn ipc_app_enforce_single_instance(handle: *mut AppHandle) -> i32
 
     let handle = unsafe { &mut *handle };
 
-    match handle.runtime.block_on(handle.app.enforce_single_instance()) {
-        Ok(true) => 1,   // Primary instance
-        Ok(false) => 0,  // Secondary instance
-        Err(_) => -1,    // Error
+    match handle
+        .runtime
+        .block_on(handle.app.enforce_single_instance())
+    {
+        Ok(true) => 1,  // Primary instance
+        Ok(false) => 0, // Secondary instance
+        Err(_) => -1,   // Error
     }
 }
 
@@ -100,8 +102,9 @@ pub extern "C" fn ipc_app_set_protocol(handle: *mut AppHandle, protocol: i32) ->
     let handle = unsafe { &mut *handle };
     handle.app = std::mem::replace(
         &mut handle.app,
-        single_instance_app::SingleInstanceApp::new("temp")
-    ).with_protocol(protocol_type);
+        single_instance_app::SingleInstanceApp::new("temp"),
+    )
+    .with_protocol(protocol_type);
 
     0
 }
@@ -162,15 +165,13 @@ pub extern "C" fn ipc_app_receive(handle: *mut AppHandle) -> *mut c_char {
     let message = handle.messages.lock().unwrap().pop();
 
     match message {
-        Some(msg) => {
-            match serde_json::to_string(&msg) {
-                Ok(json) => {
-                    let c_string = CString::new(json).unwrap();
-                    c_string.into_raw()
-                }
-                Err(_) => ptr::null_mut() as *mut c_char,
+        Some(msg) => match serde_json::to_string(&msg) {
+            Ok(json) => {
+                let c_string = CString::new(json).unwrap();
+                c_string.into_raw()
             }
-        }
+            Err(_) => ptr::null_mut() as *mut c_char,
+        },
         None => ptr::null_mut() as *mut c_char,
     }
 }
@@ -269,10 +270,13 @@ pub extern "C" fn ipc_client_send(
     let config = handle.config.clone();
 
     let result = runtime.block_on(async {
-        let protocol = match single_instance_app::communication::CommunicationFactory::create_protocol(config.protocol) {
-            Ok(p) => p,
-            Err(_) => return -1i32,
-        };
+        let protocol =
+            match single_instance_app::communication::CommunicationFactory::create_protocol(
+                config.protocol,
+            ) {
+                Ok(p) => p,
+                Err(_) => return -1i32,
+            };
 
         let mut client = match protocol.create_client(&config).await {
             Ok(c) => c,
@@ -283,7 +287,8 @@ pub extern "C" fn ipc_client_send(
             return -1i32;
         }
 
-        let msg = single_instance_app::communication::CommunicationMessage::new(message_type, payload);
+        let msg =
+            single_instance_app::communication::CommunicationMessage::new(message_type, payload);
 
         if let Err(_) = client.send_message(&msg).await {
             let _ = client.disconnect().await;
@@ -316,10 +321,13 @@ pub extern "C" fn ipc_client_receive(handle: *mut ClientHandle) -> *mut c_char {
     let result = runtime.block_on(async {
         // Create or reuse client connection
         if handle.client.is_none() {
-            let protocol = match single_instance_app::communication::CommunicationFactory::create_protocol(config.protocol) {
-                Ok(p) => p,
-                Err(_) => return ptr::null_mut() as *mut c_char,
-            };
+            let protocol =
+                match single_instance_app::communication::CommunicationFactory::create_protocol(
+                    config.protocol,
+                ) {
+                    Ok(p) => p,
+                    Err(_) => return ptr::null_mut() as *mut c_char,
+                };
 
             let mut client = match protocol.create_client(&config).await {
                 Ok(c) => c,
@@ -392,10 +400,13 @@ pub extern "C" fn ipc_client_ping(handle: *mut ClientHandle) -> i32 {
     let config = handle.config.clone();
 
     runtime.block_on(async {
-        let protocol = match single_instance_app::communication::CommunicationFactory::create_protocol(config.protocol) {
-            Ok(p) => p,
-            Err(_) => return -1i32,
-        };
+        let protocol =
+            match single_instance_app::communication::CommunicationFactory::create_protocol(
+                config.protocol,
+            ) {
+                Ok(p) => p,
+                Err(_) => return -1i32,
+            };
 
         let mut client = match protocol.create_client(&config).await {
             Ok(c) => c,

@@ -1,5 +1,6 @@
 use single_instance_app::{
-    communication::CommunicationMessage, communication::ProtocolType, communication::SerializationFormat, IpcClient,
+    communication::CommunicationMessage, communication::ProtocolType,
+    communication::SerializationFormat, IpcClient,
 };
 use std::time::{Duration, Instant};
 
@@ -21,12 +22,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Outer loop for automatic reconnection
     loop {
         println!("🔗 Connecting to wgpu Render Server...");
-        
+
         let messenger = loop {
             match client.connect_messenger().await {
                 Ok(m) => break m,
                 Err(e) => {
-                    // Only log periodically or on first attempt to avoid spamming? 
+                    // Only log periodically or on first attempt to avoid spamming?
                     // For now, keep existing behavior but maybe slightly less frequent
                     println!("⏳ Waiting for server... ({})", e);
                     tokio::time::sleep(Duration::from_secs(1)).await;
