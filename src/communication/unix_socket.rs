@@ -2,7 +2,6 @@
 //! Provides efficient local communication on Unix-like systems
 
 use super::*;
-use crate::ipc_log;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
@@ -52,6 +51,7 @@ impl CommunicationProtocol for UnixSocketProtocol {
 }
 
 /// Unix Domain Socket server implementation
+#[cfg(unix)]
 pub struct UnixSocketServer {
     config: CommunicationConfig,
     listener: Arc<Mutex<Option<tokio::net::UnixListener>>>,
@@ -60,6 +60,7 @@ pub struct UnixSocketServer {
     message_handler: SharedMessageHandler,
 }
 
+#[cfg(unix)]
 impl std::fmt::Debug for UnixSocketServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UnixSocketServer")
@@ -68,6 +69,7 @@ impl std::fmt::Debug for UnixSocketServer {
     }
 }
 
+#[cfg(unix)]
 impl Default for UnixSocketServer {
     fn default() -> Self {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(100);
@@ -81,6 +83,7 @@ impl Default for UnixSocketServer {
     }
 }
 
+#[cfg(unix)]
 impl UnixSocketServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
         let (broadcast_tx, _) = tokio::sync::broadcast::channel(100);
@@ -142,7 +145,7 @@ impl UnixSocketServer {
                 } => {
                     match read_result {
                         Ok(Some(message)) => {
-                            ipc_log!("Received message type: {}", message.message_type);
+                            crate::ipc_log!("Received message type: {}", message.message_type);
 
                             // Call message handler if set and get optional response
                             let response = if let Some(ref handler) = *self.message_handler.lock().await {
@@ -212,12 +215,13 @@ impl UnixSocketServer {
     }
 }
 
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl CommunicationServer for UnixSocketServer {
     async fn start(&mut self) -> Result<(), CommunicationError> {
         let socket_path = Self::get_socket_path(&self.config.identifier);
 
-        ipc_log!("UnixSocketServer starting on {}", socket_path);
+        crate::ipc_log!("UnixSocketServer starting on {}", socket_path);
         let listener_bound = tokio::net::UnixListener::bind(&socket_path)?;
         *self.listener.lock().await = Some(listener_bound);
         *self.is_running.lock().await = true;
@@ -305,6 +309,7 @@ impl CommunicationServer for UnixSocketServer {
 }
 
 /// Unix Domain Socket client implementation
+#[cfg(unix)]
 #[derive(Debug)]
 pub struct UnixSocketClient {
     config: CommunicationConfig,
@@ -313,6 +318,7 @@ pub struct UnixSocketClient {
     connected: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(unix)]
 impl UnixSocketClient {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
         Ok(Self {
@@ -324,11 +330,12 @@ impl UnixSocketClient {
     }
 }
 
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl CommunicationClient for UnixSocketClient {
     async fn connect(&mut self) -> Result<(), CommunicationError> {
         let socket_path = format!("/tmp/{}.sock", self.config.identifier);
-        ipc_log!("UnixSocketClient connecting to {}", socket_path);
+        crate::ipc_log!("UnixSocketClient connecting to {}", socket_path);
 
         let stream = tokio::net::UnixStream::connect(&socket_path).await?;
         let (reader_half, writer_half) = stream.into_split();

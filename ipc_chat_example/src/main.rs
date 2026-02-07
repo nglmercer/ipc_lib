@@ -84,7 +84,7 @@ async fn run_client_chat(
                             .with_source(&client_username);
 
                         // Try to send, and reconnect if it fails
-                        if let Err(_) = session.send(msg).await {
+                        if session.send(msg).await.is_err() {
                              println!("\r⚠️ Send failed, attempting to reconnect...");
                              if session.reconnect().await.is_ok() {
                                  println!("✅ Reconnected! Resending...");

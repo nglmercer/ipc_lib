@@ -318,7 +318,6 @@ impl SingleInstanceApp {
 
         #[cfg(windows)]
         {
-            use std::ptr;
             use winapi::um::processthreadsapi::OpenProcess;
             use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
 

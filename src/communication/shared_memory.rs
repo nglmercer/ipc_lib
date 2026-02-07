@@ -54,6 +54,7 @@ impl CommunicationProtocol for SharedMemoryProtocol {
 }
 
 /// Shared memory server implementation
+#[allow(dead_code)]
 pub struct SharedMemoryServer {
     config: CommunicationConfig,
     shm_file: String,
@@ -343,6 +344,7 @@ impl CommunicationServer for SharedMemoryServer {
 }
 
 /// Shared memory client implementation
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct SharedMemoryClient {
     config: CommunicationConfig,
