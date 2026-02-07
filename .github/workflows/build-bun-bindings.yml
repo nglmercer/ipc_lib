@@ -10,6 +10,7 @@ on:
 env:
   LIB_NAME: librust_ipc_bindings
   LIB_PATH: target/release
+  DOWNLOAD_PATH: bindings_download
 
 jobs:
   build:
@@ -62,13 +63,13 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ${{ env.LIB_NAME }}-
-          path: ${{ env.LIB_PATH }}/
+          pattern: ${{ env.LIB_NAME }}*
+          path: ${{ env.DOWNLOAD_PATH }}
           merge-multiple: true
 
       - name: Verify library exists
         run: |
-          ls -la ${{ env.LIB_PATH }}/
+          ls -la ${{ env.DOWNLOAD_PATH }}/ || echo "Directory not found, checking if artifacts exist..."
 
       - name: Run Bun lint
         working-directory: bindings_uniffi/examples

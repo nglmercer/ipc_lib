@@ -1,4 +1,6 @@
-use single_instance_app::{communication::ProtocolType, SingleInstanceApp};
+use single_instance_app::{
+    communication::ProtocolType, communication::SerializationFormat, SingleInstanceApp,
+};
 use std::sync::{Arc, Mutex};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -378,6 +380,7 @@ async fn main() {
     let identifier = "wgpu_render_server";
     let mut ipc_app = SingleInstanceApp::new(identifier)
         .with_protocol(ProtocolType::UnixSocket)
+        .with_serialization_format(SerializationFormat::MsgPack)
         .on_message(move |msg| {
             if msg.message_type == "render_frame" {
                 println!("📥 Server: Received render_frame message ID: {}", msg.id);

@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DOWNLOAD_PATH: bindings_download
+
 jobs:
   # Lint jobs
   lint:
@@ -160,19 +163,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: librust_ipc_bindings-*
-          path: bindings/
+          path: ${{ env.DOWNLOAD_PATH }}
           merge-multiple: true
 
       - name: Display downloaded files
-        run: ls -la bindings/
+        run: ls -la ${{ env.DOWNLOAD_PATH }}/
 
       - name: Create release bundle
         run: |
           mkdir -p release-bundle
           # Rename files to have platform-specific names
-          cp bindings/librust_ipc_bindings-ubuntu-latest/*.so release-bundle/librust_ipc_bindings-linux.so 2>/dev/null || true
-          cp bindings/librust_ipc_bindings-macos-latest/*.dylib release-bundle/librust_ipc_bindings-macos.dylib 2>/dev/null || true
-          cp bindings/librust_ipc_bindings-windows-latest/*.dll release-bundle/librust_ipc_bindings-windows.dll 2>/dev/null || true
+          cp ${{ env.DOWNLOAD_PATH }}/librust_ipc_bindings-ubuntu-latest/*.so release-bundle/librust_ipc_bindings-linux.so 2>/dev/null || true
+          cp ${{ env.DOWNLOAD_PATH }}/librust_ipc_bindings-macos-latest/*.dylib release-bundle/librust_ipc_bindings-macos.dylib 2>/dev/null || true
+          cp ${{ env.DOWNLOAD_PATH }}/librust_ipc_bindings-windows-latest/*.dll release-bundle/librust_ipc_bindings-windows.dll 2>/dev/null || true
           ls -la release-bundle/
 
       - name: Upload release assets
