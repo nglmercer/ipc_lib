@@ -4,13 +4,15 @@
 
 use super::*;
 use crate::ipc_log;
-use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, atomic::{AtomicU64, Ordering}};
 use std::collections::HashSet;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncSeekExt, AsyncBufReadExt};
+use std::path::Path;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex as StdMutex,
+};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::Duration;
-
 
 /// File-based communication protocol implementation
 #[derive(Debug)]
@@ -155,20 +157,24 @@ impl FileBasedServer {
         // Create response file using atomic write (write to temp then rename)
         let response_json = serde_json::to_string(response)?;
         let temp_file = format!("{}.temp.{}", self.message_file, std::process::id());
-        
+
         // Write to temp file first
         {
             let mut file = tokio::fs::File::create(&temp_file).await?;
             file.write_all(response_json.as_bytes()).await?;
             file.flush().await?;
         }
-        
+
         // Atomically rename to final location
-        tokio::fs::rename(&temp_file, &response_file).await.or_else(|_| {
-            // If rename fails, try direct write
-            let mut file = tokio::fs::File::create(&response_file).await?;
-            file.write_all(response_json.as_bytes()).await
-        })?;
+        match tokio::fs::rename(&temp_file, &response_file).await {
+            Ok(()) => {}
+            Err(_) => {
+                // If rename fails, try direct write and cleanup temp
+                let _ = tokio::fs::remove_file(&temp_file).await;
+                let mut file = tokio::fs::File::create(&response_file).await?;
+                file.write_all(response_json.as_bytes()).await?;
+            }
+        }
 
         Ok(())
     }
@@ -238,7 +244,7 @@ impl CommunicationServer for FileBasedServer {
                             .unwrap_or_else(|| message.create_reply(serde_json::json!("Received")));
 
                         let _ = server.send_response(&response).await;
-                        
+
                         // Broadcast the message to all clients (excluding the sender ideally, but clients filter)
                         let _ = server.broadcast(message.clone()).await;
                     }
@@ -295,17 +301,18 @@ impl CommunicationServer for FileBasedServer {
     async fn broadcast(&self, message: CommunicationMessage) -> Result<(), CommunicationError> {
         let json = serde_json::to_string(&message)?;
         let line = format!("{}\n", json);
-        
+
         // Write to a temp file first, then atomically rename
         // This prevents clients from reading a partially written file
         let temp_file = format!("{}.temp.{}", self.broadcast_file, std::process::id());
-        
+
         // Retry logic for handling concurrent file access
         let max_retries = 5;
         for attempt in 0..max_retries {
             match tokio::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&temp_file)
                 .await
             {
@@ -314,7 +321,7 @@ impl CommunicationServer for FileBasedServer {
                         ipc_log!("Broadcast write failed: {}", e);
                     }
                     file.flush().await.ok();
-                    
+
                     // Atomically rename to final location
                     // Use append mode by renaming to a final file and then appending
                     // Since we can't atomically append, we read the current content and rewrite
@@ -335,7 +342,7 @@ impl CommunicationServer for FileBasedServer {
                             ipc_log!("Failed to open broadcast file for append: {}", e);
                         }
                     }
-                    
+
                     // Clean up temp file
                     let _ = tokio::fs::remove_file(&temp_file).await;
                     return Ok(());
@@ -350,7 +357,7 @@ impl CommunicationServer for FileBasedServer {
                 }
             }
         }
-        
+
         // Final fallback: try direct append
         match tokio::fs::OpenOptions::new()
             .create(true)
@@ -365,7 +372,7 @@ impl CommunicationServer for FileBasedServer {
                 // Still failed, but that's okay - another process handled it
             }
         }
-        
+
         Ok(())
     }
 }
@@ -452,7 +459,7 @@ impl CommunicationClient for FileBasedClient {
         }
 
         let message_json = serde_json::to_string(message)?;
-        
+
         // Retry logic for handling concurrent access with server
         let max_retries = 5;
         for attempt in 0..max_retries {
@@ -473,7 +480,7 @@ impl CommunicationClient for FileBasedClient {
                 }
             }
         }
-        
+
         Ok(())
     }
 

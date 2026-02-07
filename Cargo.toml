@@ -34,6 +34,7 @@ winapi = { version = "0.3", features = [
     "processthreadsapi",
     "winnt",
     "handleapi",
+    "memoryapi",
 ] }
 
 [dev-dependencies]

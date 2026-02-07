@@ -127,35 +127,33 @@ impl CommunicationConfig {
     pub fn default_protocol() -> ProtocolType {
         #[cfg(windows)]
         {
-            ProtocolType::FileBased  // Use FileBased on Windows (cross-platform)
+            ProtocolType::FileBased // Use FileBased on Windows (cross-platform)
         }
         #[cfg(unix)]
         {
             ProtocolType::UnixSocket
         }
     }
-    
+
     /// Get the default fallback protocols for the current platform
     pub fn default_fallback_protocols() -> Vec<ProtocolType> {
-        let mut protocols = vec![
-            ProtocolType::FileBased,  // Always available - first for reliability
-            ProtocolType::InMemory,   // Always available
+        let protocols = vec![
+            ProtocolType::FileBased,
+            ProtocolType::InMemory,
         ];
-        
+
         #[cfg(unix)]
         {
+            let mut protocols = protocols;
             protocols.push(ProtocolType::UnixSocket);
             protocols.push(ProtocolType::SharedMemory);
+            protocols
         }
-        
-        #[cfg(windows)]
+
+        #[cfg(not(unix))]
         {
-            // On Windows, we can add more file-based or other protocols
-            // NamedPipe is not yet implemented, so we stick with FileBased
-            protocols.push(ProtocolType::FileBased);
+            protocols
         }
-        
-        protocols
     }
 }
 

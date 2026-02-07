@@ -3,9 +3,7 @@
 //! This example demonstrates a real-time chat application using IPC communication
 //! between multiple instances of the application.
 
-use single_instance_app::{
-    communication::CommunicationMessage, IpcClient, SingleInstanceApp,
-};
+use single_instance_app::{communication::CommunicationMessage, IpcClient, SingleInstanceApp};
 use std::env;
 use std::process;
 
@@ -169,18 +167,17 @@ async fn main() {
         });
 
     let username_clone = username.clone();
-    let mut app = SingleInstanceApp::new(identifier)
-        .on_message(move |msg| {
-            if msg.message_type == "chat" && msg.source_id != username_clone {
-                if let Some(content) = msg.payload.as_str() {
-                    println!("\r[CHAT] {}: {}", msg.source_id, content);
-                    print!("> ");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
+    let mut app = SingleInstanceApp::new(identifier).on_message(move |msg| {
+        if msg.message_type == "chat" && msg.source_id != username_clone {
+            if let Some(content) = msg.payload.as_str() {
+                println!("\r[CHAT] {}: {}", msg.source_id, content);
+                print!("> ");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
             }
-            // Explicitly return None to indicate no response from this handler
-            None
-        });
+        }
+        // Explicitly return None to indicate no response from this handler
+        None
+    });
 
     println!("🔍 Initializing chat session...");
 

@@ -1,15 +1,38 @@
 #![allow(unused)]
 //! Shared memory communication protocol implementation
 //! Provides IPC communication using memory-mapped files
-//! Works on Unix-like systems and provides fast inter-process communication
+//! Works on Unix-like systems and Windows
 
 use super::*;
 use crate::ipc_log;
-use memmap2::{MmapMut, MmapOptions};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::Duration;
+
+#[cfg(unix)]
+use memmap2::MmapOptions;
+
+#[cfg(windows)]
+use winapi::um::handleapi::CloseHandle;
+#[cfg(windows)]
+use winapi::um::memoryapi::MapViewOfFile;
+#[cfg(windows)]
+use winapi::um::memoryapi::UnmapViewOfFile;
+#[cfg(windows)]
+use winapi::um::processthreadsapi::GetCurrentProcessId;
+#[cfg(windows)]
+use winapi::um::winbase::CreateFileMappingA;
+#[cfg(windows)]
+use winapi::um::winbase::FILE_MAP_ALL_ACCESS;
+#[cfg(windows)]
+use winapi::um::winbase::FILE_MAP_READ;
+#[cfg(windows)]
+use winapi::um::winbase::FILE_MAP_WRITE;
+#[cfg(windows)]
+use winapi::um::winnt::PAGE_READWRITE;
+#[cfg(windows)]
+use std::ptr::null_mut;
 
 /// Shared memory communication protocol implementation
 #[derive(Debug)]
@@ -25,32 +48,14 @@ impl CommunicationProtocol for SharedMemoryProtocol {
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationServer>, CommunicationError> {
-        #[cfg(unix)]
-        {
-            Ok(Box::new(SharedMemoryServer::new(config)?))
-        }
-        #[cfg(not(unix))]
-        {
-            Err(CommunicationError::ConnectionFailed(
-                "Shared memory protocol is not supported on Windows".to_string(),
-            ))
-        }
+        Ok(Box::new(SharedMemoryServer::new(config)?))
     }
 
     async fn create_client(
         &self,
         config: &CommunicationConfig,
     ) -> Result<Box<dyn CommunicationClient>, CommunicationError> {
-        #[cfg(unix)]
-        {
-            Ok(Box::new(SharedMemoryClient::new(config)?))
-        }
-        #[cfg(not(unix))]
-        {
-            Err(CommunicationError::ConnectionFailed(
-                "Shared memory protocol is not supported on Windows".to_string(),
-            ))
-        }
+        Ok(Box::new(SharedMemoryClient::new(config)?))
     }
 }
 
@@ -58,34 +63,36 @@ impl CommunicationProtocol for SharedMemoryProtocol {
 #[allow(dead_code)]
 pub struct SharedMemoryServer {
     config: CommunicationConfig,
-    shm_file: String,
-    #[allow(dead_code)]
-    mmap: Arc<Mutex<Option<MmapMut>>>,
+    shm_name: String,
     is_running: Arc<Mutex<bool>>,
     message_handler: SharedMessageHandler,
+    #[cfg(windows)]
+    mapping_handle: *mut std::ffi::c_void,
 }
 
 impl std::fmt::Debug for SharedMemoryServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SharedMemoryServer")
             .field("config", &self.config)
-            .field("shm_file", &self.shm_file)
+            .field("shm_name", &self.shm_name)
             .finish()
     }
 }
 
 impl SharedMemoryServer {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
-        let shm_file = Self::get_shm_file(&config.identifier);
+        let shm_name = Self::get_shm_name(&config.identifier);
 
-        // Clean up any existing shared memory file
-        if Path::new(&shm_file).exists() {
-            std::fs::remove_file(&shm_file)?;
-        }
-
-        // Create the shared memory file
         #[cfg(unix)]
         {
+            let shm_file = Self::get_shm_file(&config.identifier);
+
+            // Clean up any existing shared memory file
+            if Path::new(&shm_file).exists() {
+                std::fs::remove_file(&shm_file)?;
+            }
+
+            // Create the shared memory file
             use std::fs::OpenOptions;
             use std::os::unix::fs::OpenOptionsExt;
 
@@ -99,30 +106,57 @@ impl SharedMemoryServer {
 
             // Set file size to accommodate our message buffer
             file.set_len(4096)?;
+
+            Ok(Self {
+                config: config.clone(),
+                shm_file,
+                is_running: Arc::new(Mutex::new(false)),
+                message_handler: Arc::new(Mutex::new(None)),
+            })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&shm_file)?;
+            // Create file mapping for shared memory
+            let mapping = unsafe {
+                CreateFileMappingA(
+                    winapi::um::winbase::INVALID_HANDLE_VALUE,
+                    null_mut(),
+                    PAGE_READWRITE,
+                    0,
+                    4096,
+                    shm_name.as_ptr() as *const i8,
+                )
+            };
 
-            file.set_len(4096)?;
+            if mapping.is_null() {
+                return Err(CommunicationError::IoError(
+                    "Failed to create file mapping".to_string(),
+                ));
+            }
+
+            Ok(Self {
+                config: config.clone(),
+                shm_name,
+                is_running: Arc::new(Mutex::new(false)),
+                message_handler: Arc::new(Mutex::new(None)),
+                mapping_handle: mapping as *mut std::ffi::c_void,
+            })
         }
-
-        Ok(Self {
-            config: config.clone(),
-            shm_file,
-            mmap: Arc::new(Mutex::new(None)),
-            is_running: Arc::new(Mutex::new(false)),
-            message_handler: Arc::new(Mutex::new(None)),
-        })
     }
 
+    #[cfg(unix)]
     fn get_shm_file(identifier: &str) -> String {
+        super::get_temp_path(identifier, "shm")
+    }
+
+    #[cfg(windows)]
+    fn get_shm_name(identifier: &str) -> String {
+        format!("Local\\IPC_LIB_{}", identifier)
+    }
+
+    #[cfg(unix)]
+    fn get_shm_name(identifier: &str) -> String {
         super::get_temp_path(identifier, "shm")
     }
 
@@ -132,42 +166,6 @@ impl SharedMemoryServer {
 
         loop {
             // Check if server is still running
-            if !*self.is_running.lock().await {
-                return Err(CommunicationError::ConnectionFailed(
-                    "Server stopped".to_string(),
-                ));
-            }
-
-            // Check if shared memory file exists
-            if !Path::new(&self.shm_file).exists() {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if start_time.elapsed() >= timeout_duration {
-                    return Err(CommunicationError::Timeout(
-                        "No message received".to_string(),
-                    ));
-                }
-                continue;
-            }
-
-            // Map the shared memory (blocking operation)
-            let shm_file = self.shm_file.clone();
-            let format = self.config.serialization_format;
-            let result = tokio::task::spawn_blocking(move || {
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&shm_file)?;
-                let mut mmap = unsafe { MmapOptions::new().map_mut(&file)? };
-
-                // Check if there's data in shared memory
-                let data = mmap.as_ref();
-                if data[0] != 0 {
-                    // First byte indicates if there's data
-                    // Read the message length (first 4 bytes)
-                    let len = u32::from_ne_bytes([data[1], data[2], data[3], data[4]]) as usize;
-
-                    if len > 0 && len < 4096 {
-                        // Read the message data (Clone to vector to avoid borrow checker issues)
                         let message_bytes = data[5..5 + len].to_vec();
 
                         // Clear the shared memory flag immediately
@@ -193,8 +191,12 @@ impl SharedMemoryServer {
                     }
                 }
                 Ok(None)
-            })
-            .await;
+            }).await;
+            
+            #[cfg(not(unix))]
+            let result = Err(CommunicationError::ProtocolNotSupported(
+                "SharedMemory is only supported on Unix-like systems".to_string(),
+            ));
 
             match result {
                 Ok(Ok(Some(message))) => return Ok(message),
@@ -202,7 +204,7 @@ impl SharedMemoryServer {
                     // No message yet, continue waiting
                 }
                 Ok(Err(e)) => return Err(e),
-                Err(e) => return Err(CommunicationError::IoError(e.to_string())),
+                Err(_) => return Err(CommunicationError::IoError("Spawn blocking failed".to_string())),
             }
 
             // Wait a bit before checking again
@@ -221,7 +223,6 @@ impl SharedMemoryServer {
         &self,
         response: &CommunicationMessage,
     ) -> Result<(), CommunicationError> {
-        // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
         let format = self.config.serialization_format;
 
@@ -234,8 +235,12 @@ impl SharedMemoryServer {
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
         };
 
+        #[cfg(unix)]
         let result = tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new()
+            use std::fs::OpenOptions;
+            use memmap2::MmapOptions;
+
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&shm_file)?;
@@ -250,12 +255,16 @@ impl SharedMemoryServer {
             mmap.flush()?;
 
             Ok::<(), CommunicationError>(())
-        })
-        .await;
+        }).await;
+        
+        #[cfg(not(unix))]
+        let result = Err(CommunicationError::ProtocolNotSupported(
+            "SharedMemory is only supported on Unix-like systems".to_string(),
+        ));
 
         match result {
             Ok(inner) => inner,
-            Err(e) => Err(CommunicationError::IoError(e.to_string())),
+            Err(_) => Err(CommunicationError::IoError("Spawn blocking failed".to_string())),
         }
     }
 }
@@ -278,7 +287,6 @@ impl CommunicationServer for SharedMemoryServer {
                 let server = Self {
                     config: server_config,
                     shm_file: shm_file.clone(),
-                    mmap: Arc::new(Mutex::new(None)),
                     is_running: is_running.clone(),
                     message_handler: message_handler.clone(),
                 };
@@ -355,11 +363,20 @@ pub struct SharedMemoryClient {
 
 impl SharedMemoryClient {
     pub fn new(config: &CommunicationConfig) -> Result<Self, CommunicationError> {
-        Ok(Self {
-            config: config.clone(),
-            shm_file: Self::get_shm_file(&config.identifier),
-            connected: false,
-        })
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                config: config.clone(),
+                shm_file: Self::get_shm_file(&config.identifier),
+                connected: false,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Err(CommunicationError::ProtocolNotSupported(
+                "SharedMemory is only supported on Unix-like systems".to_string(),
+            ))
+        }
     }
 
     fn get_shm_file(identifier: &str) -> String {
@@ -385,8 +402,13 @@ impl SharedMemoryClient {
             // Map the shared memory (blocking operation)
             let shm_file = self.shm_file.clone();
             let format = self.config.serialization_format;
+            
+            #[cfg(unix)]
             let result = tokio::task::spawn_blocking(move || {
-                let file = std::fs::OpenOptions::new()
+                use std::fs::OpenOptions;
+                use memmap2::MmapOptions;
+
+                let file = OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(&shm_file)?;
@@ -430,8 +452,12 @@ impl SharedMemoryClient {
                     }
                 }
                 Ok(None)
-            })
-            .await;
+            }).await;
+            
+            #[cfg(not(unix))]
+            let result = Err(CommunicationError::ProtocolNotSupported(
+                "SharedMemory is only supported on Unix-like systems".to_string(),
+            ));
 
             match result {
                 Ok(Ok(Some(message))) => return Ok(message),
@@ -439,7 +465,7 @@ impl SharedMemoryClient {
                     // No response yet, continue waiting
                 }
                 Ok(Err(e)) => return Err(e),
-                Err(e) => return Err(CommunicationError::IoError(e.to_string())),
+                Err(_) => return Err(CommunicationError::IoError("Spawn blocking failed".to_string())),
             }
 
             // Check timeout
@@ -476,7 +502,6 @@ impl CommunicationClient for SharedMemoryClient {
             ));
         }
 
-        // Map the shared memory for writing (blocking operation)
         let shm_file = self.shm_file.clone();
         let format = self.config.serialization_format;
 
@@ -489,8 +514,12 @@ impl CommunicationClient for SharedMemoryClient {
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?,
         };
 
+        #[cfg(unix)]
         let result = tokio::task::spawn_blocking(move || {
-            let file = std::fs::OpenOptions::new()
+            use std::fs::OpenOptions;
+            use memmap2::MmapOptions;
+
+            let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&shm_file)?;
@@ -505,12 +534,16 @@ impl CommunicationClient for SharedMemoryClient {
             mmap.flush()?;
 
             Ok::<(), CommunicationError>(())
-        })
-        .await;
+        }).await;
+        
+        #[cfg(not(unix))]
+        let result = Err(CommunicationError::ProtocolNotSupported(
+            "SharedMemory is only supported on Unix-like systems".to_string(),
+        ));
 
         match result {
             Ok(inner) => inner,
-            Err(e) => Err(CommunicationError::IoError(e.to_string())),
+            Err(_) => Err(CommunicationError::IoError("Spawn blocking failed".to_string())),
         }
     }
 
