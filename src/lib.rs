@@ -48,6 +48,7 @@ mod tests;
 pub use client::IpcClient;
 pub use communication::current_timestamp;
 pub use communication::CommunicationConfig;
+pub use communication::CommunicationMessage;
 pub use communication::ProtocolType;
 pub use communication::SerializationFormat;
 pub use logging::{disable_logging, enable_logging, is_logging_enabled};
