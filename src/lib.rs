@@ -12,7 +12,7 @@
 //!
 //! # Quick Start
 //! ```no_run
-//! use single_instance_app::enforce_single_instance;
+//! use ipc_lib::enforce_single_instance;
 //!
 //! #[tokio::main]
 //! async fn main() {

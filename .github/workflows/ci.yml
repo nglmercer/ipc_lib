@@ -130,8 +130,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish single_instance_app
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p single_instance_app
+      - name: Publish ipc_lib
+        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p ipc_lib
 
       - name: Publish bindings_uniffi
         run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }} -p bindings_uniffi

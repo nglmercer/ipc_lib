@@ -10,18 +10,18 @@ use tokio::time::{timeout, Duration};
 
 // Opaque handle for SingleInstanceApp
 pub struct AppHandle {
-    app: single_instance_app::SingleInstanceApp,
+    app: ipc_lib::SingleInstanceApp,
     runtime: Arc<Runtime>,
     // Message queue for receiving messages from clients
-    messages: Arc<std::sync::Mutex<Vec<single_instance_app::communication::CommunicationMessage>>>,
+    messages: Arc<std::sync::Mutex<Vec<ipc_lib::communication::CommunicationMessage>>>,
 }
 
 // Opaque handle for IPC Client
 pub struct ClientHandle {
-    config: single_instance_app::communication::CommunicationConfig,
+    config: ipc_lib::communication::CommunicationConfig,
     runtime: Arc<Runtime>,
     // Persistent connection for receiving messages
-    client: Option<Box<dyn single_instance_app::communication::CommunicationClient>>,
+    client: Option<Box<dyn ipc_lib::communication::CommunicationClient>>,
 }
 
 /// Create a new SingleInstanceApp
@@ -47,7 +47,7 @@ pub extern "C" fn ipc_app_new(identifier: *const c_char) -> *mut AppHandle {
     let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
     let messages_clone = messages.clone();
 
-    let app = single_instance_app::SingleInstanceApp::new(identifier).on_message(move |msg| {
+    let app = ipc_lib::SingleInstanceApp::new(identifier).on_message(move |msg| {
         // Store received messages in the queue
         messages_clone.lock().unwrap().push(msg.clone());
         // Return a response to acknowledge receipt
@@ -91,18 +91,18 @@ pub extern "C" fn ipc_app_set_protocol(handle: *mut AppHandle, protocol: i32) ->
     }
 
     let protocol_type = match protocol {
-        0 => single_instance_app::ProtocolType::UnixSocket,
-        1 => single_instance_app::ProtocolType::NamedPipe,
-        2 => single_instance_app::ProtocolType::SharedMemory,
-        3 => single_instance_app::ProtocolType::FileBased,
-        4 => single_instance_app::ProtocolType::InMemory,
+        0 => ipc_lib::ProtocolType::UnixSocket,
+        1 => ipc_lib::ProtocolType::NamedPipe,
+        2 => ipc_lib::ProtocolType::SharedMemory,
+        3 => ipc_lib::ProtocolType::FileBased,
+        4 => ipc_lib::ProtocolType::InMemory,
         _ => return -1,
     };
 
     let handle = unsafe { &mut *handle };
     handle.app = std::mem::replace(
         &mut handle.app,
-        single_instance_app::SingleInstanceApp::new("temp"),
+        ipc_lib::SingleInstanceApp::new("temp"),
     )
     .with_protocol(protocol_type);
 
@@ -142,7 +142,7 @@ pub extern "C" fn ipc_app_broadcast(
         Err(_) => return -1,
     };
 
-    let msg = single_instance_app::communication::CommunicationMessage::new(message_type, payload);
+    let msg = ipc_lib::communication::CommunicationMessage::new(message_type, payload);
 
     match handle.runtime.block_on(handle.app.broadcast(msg)) {
         Ok(_) => 0,
@@ -196,9 +196,9 @@ pub extern "C" fn ipc_client_new(identifier: *const c_char) -> *mut ClientHandle
         Err(_) => return ptr::null_mut(),
     };
 
-    let config = single_instance_app::communication::CommunicationConfig {
+    let config = ipc_lib::communication::CommunicationConfig {
         identifier: identifier.to_string(),
-        protocol: single_instance_app::ProtocolType::UnixSocket,
+        protocol: ipc_lib::ProtocolType::UnixSocket,
         ..Default::default()
     };
 
@@ -219,11 +219,11 @@ pub extern "C" fn ipc_client_set_protocol(handle: *mut ClientHandle, protocol: i
     }
 
     let protocol_type = match protocol {
-        0 => single_instance_app::ProtocolType::UnixSocket,
-        1 => single_instance_app::ProtocolType::NamedPipe,
-        2 => single_instance_app::ProtocolType::SharedMemory,
-        3 => single_instance_app::ProtocolType::FileBased,
-        4 => single_instance_app::ProtocolType::InMemory,
+        0 => ipc_lib::ProtocolType::UnixSocket,
+        1 => ipc_lib::ProtocolType::NamedPipe,
+        2 => ipc_lib::ProtocolType::SharedMemory,
+        3 => ipc_lib::ProtocolType::FileBased,
+        4 => ipc_lib::ProtocolType::InMemory,
         _ => return -1,
     };
 
@@ -271,7 +271,7 @@ pub extern "C" fn ipc_client_send(
 
     let result = runtime.block_on(async {
         let protocol =
-            match single_instance_app::communication::CommunicationFactory::create_protocol(
+            match ipc_lib::communication::CommunicationFactory::create_protocol(
                 config.protocol,
             ) {
                 Ok(p) => p,
@@ -288,7 +288,7 @@ pub extern "C" fn ipc_client_send(
         }
 
         let msg =
-            single_instance_app::communication::CommunicationMessage::new(message_type, payload);
+            ipc_lib::communication::CommunicationMessage::new(message_type, payload);
 
         if let Err(_) = client.send_message(&msg).await {
             let _ = client.disconnect().await;
@@ -322,7 +322,7 @@ pub extern "C" fn ipc_client_receive(handle: *mut ClientHandle) -> *mut c_char {
         // Create or reuse client connection
         if handle.client.is_none() {
             let protocol =
-                match single_instance_app::communication::CommunicationFactory::create_protocol(
+                match ipc_lib::communication::CommunicationFactory::create_protocol(
                     config.protocol,
                 ) {
                     Ok(p) => p,
@@ -401,7 +401,7 @@ pub extern "C" fn ipc_client_ping(handle: *mut ClientHandle) -> i32 {
 
     runtime.block_on(async {
         let protocol =
-            match single_instance_app::communication::CommunicationFactory::create_protocol(
+            match ipc_lib::communication::CommunicationFactory::create_protocol(
                 config.protocol,
             ) {
                 Ok(p) => p,

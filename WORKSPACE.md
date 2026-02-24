@@ -6,7 +6,7 @@ This workspace has been configured to separate the core IPC library from its mul
 
 ## Workspace Members
 
-### 1. **`single_instance_app`** (Root Crate)
+### 1. **`ipc_lib`** (Root Crate)
 
 - **Location**: `./src/`
 - **Type**: Library (`lib`)
@@ -42,7 +42,7 @@ This workspace has been configured to separate the core IPC library from its mul
 ### Separation of Concerns
 
 1. **Core Library Stays Lightweight**
-   - Rust users only need `single_instance_app`
+   - Rust users only need `ipc_lib`
    - No UniFFI dependencies unless needed
    - Faster compilation for Rust-only projects
 
@@ -97,7 +97,7 @@ cargo build --workspace
 ```bash
 cargo build
 # or
-cargo build -p single_instance_app
+cargo build -p ipc_lib
 ```
 
 ### Build Only Bindings
@@ -160,7 +160,7 @@ cargo test --workspace
 Recommended CI workflow:
 
 1. **Core Library CI**:
-   - Build and test `single_instance_app`
+   - Build and test `ipc_lib`
    - Run on multiple platforms (Linux, macOS, Windows)
    - Check formatting and lints
 
@@ -184,7 +184,7 @@ If you were using a single crate before:
 
 ## Next Steps
 
-1. **For Rust Users**: Just use `single_instance_app` from crates.io
+1. **For Rust Users**: Just use `ipc_lib` from crates.io
 2. **For Python Users**: Build bindings and create a PyPI package
 3. **For Mobile Developers**: Generate Swift/Kotlin bindings
 4. **For Contributors**: See individual README files in each crate

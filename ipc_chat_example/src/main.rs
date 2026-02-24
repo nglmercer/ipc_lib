@@ -3,7 +3,7 @@
 //! This example demonstrates a real-time chat application using IPC communication
 //! between multiple instances of the application.
 
-use single_instance_app::{communication::CommunicationMessage, IpcClient, SingleInstanceApp};
+use ipc_lib::{communication::CommunicationMessage, IpcClient, SingleInstanceApp};
 use std::env;
 use std::process;
 
@@ -153,7 +153,7 @@ async fn main() {
 
     // Check if logging should be enabled
     if args.iter().any(|arg| arg == "--log") {
-        single_instance_app::enable_logging();
+        ipc_lib::enable_logging();
         println!("📝 Logging enabled");
     }
 

@@ -31,9 +31,9 @@ pub enum CommunicationError {
     Unknown(String),
 }
 
-impl From<single_instance_app::communication::CommunicationError> for CommunicationError {
-    fn from(e: single_instance_app::communication::CommunicationError) -> Self {
-        use single_instance_app::communication::CommunicationError as Inner;
+impl From<ipc_lib::communication::CommunicationError> for CommunicationError {
+    fn from(e: ipc_lib::communication::CommunicationError) -> Self {
+        use ipc_lib::communication::CommunicationError as Inner;
         match e {
             Inner::ConnectionFailed(m) => Self::ConnectionFailed(m),
             Inner::SerializationFailed(m) => Self::SerializationFailed(m),
@@ -57,14 +57,14 @@ pub enum ProtocolType {
     InMemory,
 }
 
-impl From<ProtocolType> for single_instance_app::ProtocolType {
+impl From<ProtocolType> for ipc_lib::ProtocolType {
     fn from(p: ProtocolType) -> Self {
         match p {
-            ProtocolType::UnixSocket => single_instance_app::ProtocolType::UnixSocket,
-            ProtocolType::NamedPipe => single_instance_app::ProtocolType::NamedPipe,
-            ProtocolType::SharedMemory => single_instance_app::ProtocolType::SharedMemory,
-            ProtocolType::FileBased => single_instance_app::ProtocolType::FileBased,
-            ProtocolType::InMemory => single_instance_app::ProtocolType::InMemory,
+            ProtocolType::UnixSocket => ipc_lib::ProtocolType::UnixSocket,
+            ProtocolType::NamedPipe => ipc_lib::ProtocolType::NamedPipe,
+            ProtocolType::SharedMemory => ipc_lib::ProtocolType::SharedMemory,
+            ProtocolType::FileBased => ipc_lib::ProtocolType::FileBased,
+            ProtocolType::InMemory => ipc_lib::ProtocolType::InMemory,
         }
     }
 }
@@ -81,8 +81,8 @@ pub struct CommunicationMessage {
     pub metadata_json: String,
 }
 
-impl From<single_instance_app::communication::CommunicationMessage> for CommunicationMessage {
-    fn from(msg: single_instance_app::communication::CommunicationMessage) -> Self {
+impl From<ipc_lib::communication::CommunicationMessage> for CommunicationMessage {
+    fn from(msg: ipc_lib::communication::CommunicationMessage) -> Self {
         Self {
             id: msg.id,
             message_type: msg.message_type,
@@ -98,13 +98,13 @@ impl From<single_instance_app::communication::CommunicationMessage> for Communic
 impl CommunicationMessage {
     pub fn to_inner(
         &self,
-    ) -> Result<single_instance_app::communication::CommunicationMessage, String> {
+    ) -> Result<ipc_lib::communication::CommunicationMessage, String> {
         let payload: serde_json::Value = serde_json::from_str(&self.payload_json)
             .map_err(|e| format!("Invalid JSON payload: {}", e))?;
         let metadata: serde_json::Value = serde_json::from_str(&self.metadata_json)
             .map_err(|e| format!("Invalid JSON metadata: {}", e))?;
 
-        Ok(single_instance_app::communication::CommunicationMessage {
+        Ok(ipc_lib::communication::CommunicationMessage {
             id: self.id.clone(),
             message_type: self.message_type.clone(),
             payload,
@@ -125,7 +125,7 @@ pub trait MessageHandler: Send + Sync {
 // Main Object
 #[derive(uniffi::Object)]
 pub struct SingleInstanceApp {
-    inner: Mutex<Option<single_instance_app::SingleInstanceApp>>,
+    inner: Mutex<Option<ipc_lib::SingleInstanceApp>>,
 }
 
 #[uniffi::export]
@@ -133,7 +133,7 @@ impl SingleInstanceApp {
     #[uniffi::constructor]
     pub fn new(identifier: String) -> Self {
         Self {
-            inner: Mutex::new(Some(single_instance_app::SingleInstanceApp::new(
+            inner: Mutex::new(Some(ipc_lib::SingleInstanceApp::new(
                 &identifier,
             ))),
         }
@@ -159,7 +159,7 @@ impl SingleInstanceApp {
         if let Some(app) = guard.take() {
             let handler = Arc::new(handler);
             // Create a closure that calls the foreign handler
-            let callback = move |msg: single_instance_app::communication::CommunicationMessage| {
+            let callback = move |msg: ipc_lib::communication::CommunicationMessage| {
                 let outer_msg = CommunicationMessage::from(msg);
                 let response = handler.on_message(outer_msg);
 
@@ -200,7 +200,7 @@ impl SingleInstanceApp {
             let payload: serde_json::Value = serde_json::from_str(&payload_json)
                 .map_err(|e| CommunicationError::SerializationFailed(e.to_string()))?;
 
-            let msg = single_instance_app::communication::CommunicationMessage::new(
+            let msg = ipc_lib::communication::CommunicationMessage::new(
                 &message_type,
                 payload,
             );

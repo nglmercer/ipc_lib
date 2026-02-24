@@ -264,8 +264,8 @@ dependencies = [
 name = "bindings_uniffi"
 version = "0.1.0"
 dependencies = [
+ "ipc_lib",
  "serde_json",
- "single_instance_app",
  "thiserror 1.0.69",
  "tokio",
  "uniffi",
@@ -863,10 +863,26 @@ dependencies = [
 name = "ipc_chat_example"
 version = "0.1.0"
 dependencies = [
+ "ipc_lib",
  "serde",
  "serde_json",
- "single_instance_app",
  "tokio",
+]
+
+[[package]]
+name = "ipc_lib"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "memmap2",
+ "rand",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "winapi",
 ]
 
 [[package]]
@@ -1912,22 +1928,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "single_instance_app"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "libc",
- "memmap2",
- "rand",
- "rmp-serde",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "winapi",
-]
-
-[[package]]
 name = "siphasher"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2751,10 +2751,10 @@ dependencies = [
  "base64",
  "bytemuck",
  "env_logger",
+ "ipc_lib",
  "log",
  "pollster",
  "serde_json",
- "single_instance_app",
  "tokio",
  "uuid",
  "wgpu",

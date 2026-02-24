@@ -10,13 +10,13 @@ use crate::{client::IpcClient, server::IpcServer, Message};
 // ============ SingleInstanceApp Tests ============
 
 #[test]
-fn test_single_instance_app_new() {
+fn test_ipc_lib_new() {
     let app = SingleInstanceApp::new("test_app");
     assert_eq!(app.config().identifier, "test_app");
 }
 
 #[test]
-fn test_single_instance_app_with_protocol() {
+fn test_ipc_lib_with_protocol() {
     let app = SingleInstanceApp::new("test_app")
         .with_protocol(ProtocolType::FileBased)
         .with_timeout(3000);
@@ -26,20 +26,20 @@ fn test_single_instance_app_with_protocol() {
 }
 
 #[test]
-fn test_single_instance_app_without_fallback() {
+fn test_ipc_lib_without_fallback() {
     let app = SingleInstanceApp::new("test_app").without_fallback();
     assert!(!app.config().enable_fallback);
 }
 
 #[test]
-fn test_single_instance_app_with_fallback_protocols() {
+fn test_ipc_lib_with_fallback_protocols() {
     let protocols = vec![ProtocolType::FileBased, ProtocolType::InMemory];
     let app = SingleInstanceApp::new("test_app").with_fallback_protocols(protocols.clone());
     assert_eq!(app.config().fallback_protocols, protocols);
 }
 
 #[test]
-fn test_single_instance_app_endpoint_none_when_not_started() {
+fn test_ipc_lib_endpoint_none_when_not_started() {
     let app = SingleInstanceApp::new("test_app");
     assert!(app.endpoint().is_none());
 }

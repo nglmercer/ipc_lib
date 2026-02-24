@@ -58,7 +58,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "single_instance_app",
+ "ipc_lib",
  "tokio",
 ]
 
@@ -264,7 +264,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "single_instance_app"
+name = "ipc_lib"
 version = "0.1.0"
 dependencies = [
  "async-trait",

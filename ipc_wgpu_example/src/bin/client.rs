@@ -1,4 +1,4 @@
-use single_instance_app::{
+use ipc_lib::{
     communication::CommunicationMessage, communication::ProtocolType,
     communication::SerializationFormat, IpcClient,
 };

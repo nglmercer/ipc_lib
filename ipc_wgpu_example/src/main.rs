@@ -1,4 +1,4 @@
-use single_instance_app::{
+use ipc_lib::{
     communication::ProtocolType, communication::SerializationFormat, SingleInstanceApp,
 };
 use std::sync::{Arc, Mutex};

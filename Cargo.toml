@@ -1,11 +1,11 @@
 [package]
-name = "single_instance_app"
+name = "ipc_lib"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["nglmercer <nglmercer@gmail.com>"]
 license = "MIT OR Apache-2.0"
 description = "A robust single-instance application library with multiple IPC protocols"
-repository = "https://github.com/yourusername/rust_ipc"
+repository = "https://github.com/nglmercer/ipc_lib"
 keywords = ["ipc", "single-instance", "async", "tokio", "communication"]
 categories = ["asynchronous", "os", "network-programming"]
 readme = "README.md"

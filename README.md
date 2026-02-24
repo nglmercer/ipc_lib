@@ -17,7 +17,7 @@ This is a Cargo workspace with the following crates:
 
 ```
 RUST_IPC/
-├── src/                      # Core library (single_instance_app)
+├── src/                      # Core library (ipc_lib)
 │   ├── lib.rs               # Main library interface
 │   └── communication/       # IPC protocol implementations
 ├── bindings_uniffi/         # Multi-language bindings (Python, etc.)
@@ -25,7 +25,7 @@ RUST_IPC/
 └── ipc_wgpu_example/        # Example: GPU rendering with IPC
 ```
 
-### Core Library (`single_instance_app`)
+### Core Library (`ipc_lib`)
 
 The main Rust library that can be used directly in Rust projects.
 
@@ -33,13 +33,13 @@ The main Rust library that can be used directly in Rust projects.
 
 ```toml
 [dependencies]
-single_instance_app = "0.1.0"
+ipc_lib = "0.1.0"
 ```
 
 **Basic Usage:**
 
 ```rust
-use single_instance_app::{SingleInstanceApp, ProtocolType};
+use ipc_lib::{SingleInstanceApp, ProtocolType};
 
 #[tokio::main]
 async fn main() {
